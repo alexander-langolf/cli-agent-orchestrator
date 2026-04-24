@@ -22,6 +22,7 @@ export function TerminalView({ terminalId, provider, agentProfile, onClose }: Te
       cursorBlink: true,
       fontSize: 14,
       fontFamily: 'JetBrains Mono, Menlo, Monaco, Consolas, monospace',
+      macOptionIsMeta: true,
       scrollback: 10000,
       theme: {
         background: '#0d1117',
