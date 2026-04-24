@@ -34,6 +34,20 @@ class TestResolveAndValidateWorkingDirectory:
 
 
 class TestSessionAndTabCreation:
+    def test_build_env_supplies_terminal_color_capabilities_for_detached_server(
+        self, client, monkeypatch
+    ):
+        monkeypatch.setenv("TERM", "dumb")
+        monkeypatch.setenv("NO_COLOR", "1")
+        monkeypatch.delenv("COLORTERM", raising=False)
+
+        env = client._build_env({"CAO_TERMINAL_ID": "abcd1234"})
+
+        assert env["TERM"] == "xterm-256color"
+        assert env["COLORTERM"] == "truecolor"
+        assert "NO_COLOR" not in env
+        assert env["CAO_TERMINAL_ID"] == "abcd1234"
+
     @patch("cli_agent_orchestrator.clients.zellij.subprocess.run")
     def test_create_session_creates_background_session_and_discovers_pane(
         self, mock_run, client, tmp_path

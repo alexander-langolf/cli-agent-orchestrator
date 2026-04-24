@@ -62,6 +62,11 @@ class ZellijClient:
     def _build_env(self, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         env = os.environ.copy()
         env["ZELLIJ_SOCKET_DIR"] = self.socket_dir
+        env.pop("NO_COLOR", None)
+        if env.get("TERM") in (None, "", "dumb"):
+            env["TERM"] = "xterm-256color"
+        if not env.get("COLORTERM"):
+            env["COLORTERM"] = "truecolor"
         if extra:
             env.update(extra)
         return env
