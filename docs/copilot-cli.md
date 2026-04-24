@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Copilot provider enables CLI Agent Orchestrator (CAO) to run **GitHub Copilot CLI** in tmux-managed sessions.
+The Copilot provider enables CLI Agent Orchestrator (CAO) to run **GitHub Copilot CLI** in Zellij-managed sessions.
 
 This provider targets the current Copilot CLI surface (latest versions) and does not include legacy compatibility fallbacks.
 
@@ -12,7 +12,7 @@ This provider targets the current Copilot CLI surface (latest versions) and does
 
 1. **GitHub Copilot access** and successful `copilot login`
 2. **Copilot CLI** installed (`copilot` command available)
-3. **tmux** installed
+3. **Zellij** installed
 
 ```bash
 # Install Copilot CLI
@@ -154,4 +154,4 @@ uv run pytest -m e2e test/e2e/test_supervisor_orchestration.py::TestCopilotCliSu
    - Ensure `cao-mcp-server` is resolvable in current environment
 
 4. **Stuck in WAITING_USER_ANSWER**
-   - Check active tmux pane for trust/confirmation prompt and answer once
+   - Check active Zellij pane for trust/confirmation prompt and answer once

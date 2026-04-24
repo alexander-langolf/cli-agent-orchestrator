@@ -1,6 +1,7 @@
 """Full tests for terminal service."""
 
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,13 +19,23 @@ from cli_agent_orchestrator.services.terminal_service import (
 )
 
 
+def runtime_info(name: str = "developer-abcd") -> SimpleNamespace:
+    return SimpleNamespace(
+        name=name,
+        session_name="cao-session",
+        tab_id=1,
+        pane_id=4,
+        launch_working_directory="/repo",
+    )
+
+
 class TestCreateTerminal:
     """Tests for create_terminal function."""
 
     @patch("cli_agent_orchestrator.services.terminal_service.TERMINAL_LOG_DIR")
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
     @patch("cli_agent_orchestrator.services.terminal_service.db_create_terminal")
-    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_window_name")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_session_name")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_terminal_id")
@@ -35,7 +46,7 @@ class TestCreateTerminal:
         mock_gen_id,
         mock_gen_session,
         mock_gen_window,
-        mock_tmux,
+        mock_Zellij,
         mock_db_create,
         mock_provider_manager,
         mock_log_dir,
@@ -44,7 +55,8 @@ class TestCreateTerminal:
         mock_gen_id.return_value = "test1234"
         mock_gen_session.return_value = "cao-session"
         mock_gen_window.return_value = "developer-abcd"
-        mock_tmux.session_exists.return_value = False
+        mock_Zellij.session_exists.return_value = False
+        mock_Zellij.create_session.return_value = runtime_info()
         mock_load_profile.return_value = AgentProfile(name="developer", description="Developer")
         mock_provider = MagicMock()
         mock_provider_manager.create_provider.return_value = mock_provider
@@ -54,13 +66,13 @@ class TestCreateTerminal:
         result = create_terminal("kiro_cli", "developer", new_session=True)
 
         assert result.id == "test1234"
-        mock_tmux.create_session.assert_called_once()
+        mock_Zellij.create_session.assert_called_once()
         mock_provider.initialize.assert_called_once()
 
     @patch("cli_agent_orchestrator.services.terminal_service.TERMINAL_LOG_DIR")
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
     @patch("cli_agent_orchestrator.services.terminal_service.db_create_terminal")
-    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_window_name")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_session_name")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_terminal_id")
@@ -71,7 +83,7 @@ class TestCreateTerminal:
         mock_gen_id,
         mock_gen_session,
         mock_gen_window,
-        mock_tmux,
+        mock_Zellij,
         mock_db_create,
         mock_provider_manager,
         mock_log_dir,
@@ -80,8 +92,8 @@ class TestCreateTerminal:
         mock_gen_id.return_value = "test1234"
         mock_gen_session.return_value = "cao-session"
         mock_gen_window.return_value = "developer-abcd"
-        mock_tmux.session_exists.return_value = True
-        mock_tmux.create_window.return_value = "developer-abcd"
+        mock_Zellij.session_exists.return_value = True
+        mock_Zellij.create_window.return_value = runtime_info()
         mock_load_profile.return_value = AgentProfile(name="developer", description="Developer")
         mock_provider = MagicMock()
         mock_provider_manager.create_provider.return_value = mock_provider
@@ -91,39 +103,39 @@ class TestCreateTerminal:
         result = create_terminal("kiro_cli", "developer", session_name="cao-existing")
 
         assert result.id == "test1234"
-        mock_tmux.create_window.assert_called_once()
+        mock_Zellij.create_window.assert_called_once()
 
-    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_window_name")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_session_name")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_terminal_id")
     @patch("cli_agent_orchestrator.services.terminal_service.load_agent_profile")
     def test_create_terminal_session_not_found(
-        self, mock_load_profile, mock_gen_id, mock_gen_session, mock_gen_window, mock_tmux
+        self, mock_load_profile, mock_gen_id, mock_gen_session, mock_gen_window, mock_Zellij
     ):
         """Test creating terminal when session not found."""
         mock_gen_id.return_value = "test1234"
         mock_gen_session.return_value = "cao-session"
         mock_gen_window.return_value = "developer-abcd"
-        mock_tmux.session_exists.return_value = False
+        mock_Zellij.session_exists.return_value = False
         mock_load_profile.return_value = AgentProfile(name="developer", description="Developer")
 
         with pytest.raises(ValueError, match="not found"):
             create_terminal("kiro_cli", "developer", session_name="cao-nonexistent")
 
-    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_window_name")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_session_name")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_terminal_id")
     @patch("cli_agent_orchestrator.services.terminal_service.load_agent_profile")
     def test_create_terminal_session_already_exists(
-        self, mock_load_profile, mock_gen_id, mock_gen_session, mock_gen_window, mock_tmux
+        self, mock_load_profile, mock_gen_id, mock_gen_session, mock_gen_window, mock_Zellij
     ):
         """Test creating terminal when session already exists."""
         mock_gen_id.return_value = "test1234"
         mock_gen_session.return_value = "cao-session"
         mock_gen_window.return_value = "developer-abcd"
-        mock_tmux.session_exists.return_value = True
+        mock_Zellij.session_exists.return_value = True
         mock_load_profile.return_value = AgentProfile(name="developer", description="Developer")
 
         with pytest.raises(ValueError, match="already exists"):
@@ -132,7 +144,7 @@ class TestCreateTerminal:
     @patch("cli_agent_orchestrator.services.terminal_service.TERMINAL_LOG_DIR")
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
     @patch("cli_agent_orchestrator.services.terminal_service.db_create_terminal")
-    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_window_name")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_session_name")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_terminal_id")
@@ -145,7 +157,7 @@ class TestCreateTerminal:
         mock_gen_id,
         mock_gen_session,
         mock_gen_window,
-        mock_tmux,
+        mock_Zellij,
         mock_db_create,
         mock_provider_manager,
         mock_log_dir,
@@ -154,7 +166,8 @@ class TestCreateTerminal:
         mock_gen_id.return_value = "test1234"
         mock_gen_session.return_value = "cao-session"
         mock_gen_window.return_value = "developer-abcd"
-        mock_tmux.session_exists.return_value = False
+        mock_Zellij.session_exists.return_value = False
+        mock_Zellij.create_session.return_value = runtime_info()
         mock_load_profile.return_value = AgentProfile(
             name="developer",
             description="Developer",
@@ -190,7 +203,7 @@ class TestCreateTerminal:
     @patch("cli_agent_orchestrator.services.terminal_service.TERMINAL_LOG_DIR")
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
     @patch("cli_agent_orchestrator.services.terminal_service.db_create_terminal")
-    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_window_name")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_session_name")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_terminal_id")
@@ -203,7 +216,7 @@ class TestCreateTerminal:
         mock_gen_id,
         mock_gen_session,
         mock_gen_window,
-        mock_tmux,
+        mock_Zellij,
         mock_db_create,
         mock_provider_manager,
         mock_log_dir,
@@ -212,7 +225,8 @@ class TestCreateTerminal:
         mock_gen_id.return_value = "test1234"
         mock_gen_session.return_value = "cao-session"
         mock_gen_window.return_value = "developer-abcd"
-        mock_tmux.session_exists.return_value = False
+        mock_Zellij.session_exists.return_value = False
+        mock_Zellij.create_session.return_value = runtime_info()
         mock_load_profile.return_value = AgentProfile(
             name="developer",
             description="Developer",
@@ -234,7 +248,7 @@ class TestCreateTerminal:
     @patch("cli_agent_orchestrator.services.terminal_service.TERMINAL_LOG_DIR")
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
     @patch("cli_agent_orchestrator.services.terminal_service.db_create_terminal")
-    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_window_name")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_session_name")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_terminal_id")
@@ -247,7 +261,7 @@ class TestCreateTerminal:
         mock_gen_id,
         mock_gen_session,
         mock_gen_window,
-        mock_tmux,
+        mock_Zellij,
         mock_db_create,
         mock_provider_manager,
         mock_log_dir,
@@ -257,7 +271,8 @@ class TestCreateTerminal:
         mock_gen_id.return_value = "test1234"
         mock_gen_session.return_value = "cao-session"
         mock_gen_window.return_value = "developer-abcd"
-        mock_tmux.session_exists.return_value = False
+        mock_Zellij.session_exists.return_value = False
+        mock_Zellij.create_session.return_value = runtime_info()
         mock_load_profile.return_value = AgentProfile(
             name="developer",
             description="Developer",
@@ -283,7 +298,7 @@ class TestCreateTerminal:
     @patch("cli_agent_orchestrator.services.terminal_service.TERMINAL_LOG_DIR")
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
     @patch("cli_agent_orchestrator.services.terminal_service.db_create_terminal")
-    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_window_name")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_session_name")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_terminal_id")
@@ -296,7 +311,7 @@ class TestCreateTerminal:
         mock_gen_id,
         mock_gen_session,
         mock_gen_window,
-        mock_tmux,
+        mock_Zellij,
         mock_db_create,
         mock_provider_manager,
         mock_log_dir,
@@ -305,7 +320,8 @@ class TestCreateTerminal:
         mock_gen_id.return_value = "test1234"
         mock_gen_session.return_value = "cao-session"
         mock_gen_window.return_value = "developer-abcd"
-        mock_tmux.session_exists.return_value = False
+        mock_Zellij.session_exists.return_value = False
+        mock_Zellij.create_session.return_value = runtime_info()
         mock_load_profile.return_value = AgentProfile(
             name="developer", description="Developer", system_prompt="You are the developer."
         )
@@ -321,7 +337,7 @@ class TestCreateTerminal:
     @patch("cli_agent_orchestrator.services.terminal_service.TERMINAL_LOG_DIR")
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
     @patch("cli_agent_orchestrator.services.terminal_service.db_create_terminal")
-    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_window_name")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_session_name")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_terminal_id")
@@ -334,7 +350,7 @@ class TestCreateTerminal:
         mock_gen_id,
         mock_gen_session,
         mock_gen_window,
-        mock_tmux,
+        mock_Zellij,
         mock_db_create,
         mock_provider_manager,
         mock_log_dir,
@@ -345,7 +361,8 @@ class TestCreateTerminal:
         mock_gen_id.return_value = "test1234"
         mock_gen_session.return_value = "cao-session"
         mock_gen_window.return_value = "developer-abcd"
-        mock_tmux.session_exists.return_value = False
+        mock_Zellij.session_exists.return_value = False
+        mock_Zellij.create_session.return_value = runtime_info()
         mock_load_profile.return_value = AgentProfile(
             name="developer", description="Developer", system_prompt="Base prompt"
         )
@@ -359,7 +376,7 @@ class TestCreateTerminal:
     @patch("cli_agent_orchestrator.services.terminal_service.TERMINAL_LOG_DIR")
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
     @patch("cli_agent_orchestrator.services.terminal_service.db_create_terminal")
-    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_window_name")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_session_name")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_terminal_id")
@@ -370,7 +387,7 @@ class TestCreateTerminal:
         mock_gen_id,
         mock_gen_session,
         mock_gen_window,
-        mock_tmux,
+        mock_Zellij,
         mock_db_create,
         mock_provider_manager,
         mock_log_dir,
@@ -379,7 +396,8 @@ class TestCreateTerminal:
         mock_gen_id.return_value = "test1234"
         mock_gen_session.return_value = "cao-session"
         mock_gen_window.return_value = "my-agent-abcd"
-        mock_tmux.session_exists.return_value = False
+        mock_Zellij.session_exists.return_value = False
+        mock_Zellij.create_session.return_value = runtime_info(name="my-agent-abcd")
         mock_load_profile.side_effect = FileNotFoundError("Agent profile not found: my-agent")
         mock_provider = MagicMock()
         mock_provider_manager.create_provider.return_value = mock_provider
@@ -403,9 +421,9 @@ class TestGetTerminal:
         """Test getting terminal successfully."""
         mock_get_metadata.return_value = {
             "id": "test1234",
-            "tmux_window": "developer-abcd",
+            "terminal_name": "developer-abcd",
             "provider": "kiro_cli",
-            "tmux_session": "cao-session",
+            "session_name": "cao-session",
             "agent_profile": "developer",
             "last_active": datetime.now(),
         }
@@ -432,9 +450,9 @@ class TestGetTerminal:
         """Test getting terminal when provider not found."""
         mock_get_metadata.return_value = {
             "id": "test1234",
-            "tmux_window": "developer-abcd",
+            "terminal_name": "developer-abcd",
             "provider": "kiro_cli",
-            "tmux_session": "cao-session",
+            "session_name": "cao-session",
             "agent_profile": "developer",
             "last_active": datetime.now(),
         }
@@ -447,19 +465,23 @@ class TestGetTerminal:
 class TestGetWorkingDirectory:
     """Tests for get_working_directory function."""
 
-    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
     @patch("cli_agent_orchestrator.services.terminal_service.get_terminal_metadata")
-    def test_get_working_directory_success(self, mock_get_metadata, mock_tmux):
+    def test_get_working_directory_success(self, mock_get_metadata, mock_Zellij):
         """Test getting working directory successfully."""
         mock_get_metadata.return_value = {
-            "tmux_session": "cao-session",
-            "tmux_window": "developer-abcd",
+            "session_name": "cao-session",
+            "terminal_name": "developer-abcd",
+            "launch_working_directory": "/home/user/project",
         }
-        mock_tmux.get_pane_working_directory.return_value = "/home/user/project"
+        mock_Zellij.get_pane_working_directory.return_value = "/home/user/project"
 
         result = get_working_directory("test1234")
 
         assert result == "/home/user/project"
+        mock_Zellij.get_pane_working_directory.assert_called_once_with(
+            "cao-session", "developer-abcd", "/home/user/project"
+        )
 
     @patch("cli_agent_orchestrator.services.terminal_service.get_terminal_metadata")
     def test_get_working_directory_not_found(self, mock_get_metadata):
@@ -475,13 +497,14 @@ class TestSendInput:
 
     @patch("cli_agent_orchestrator.services.terminal_service.update_last_active")
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
-    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
     @patch("cli_agent_orchestrator.services.terminal_service.get_terminal_metadata")
-    def test_send_input_success(self, mock_get_metadata, mock_tmux, mock_pm, mock_update):
+    def test_send_input_success(self, mock_get_metadata, mock_Zellij, mock_pm, mock_update):
         """Test sending input successfully."""
         mock_get_metadata.return_value = {
-            "tmux_session": "cao-session",
-            "tmux_window": "developer-abcd",
+            "session_name": "cao-session",
+            "terminal_name": "developer-abcd",
+            "zellij_tab_id": 1,
         }
         mock_provider = mock_pm.get_provider.return_value
         mock_provider.paste_enter_count = 2
@@ -489,7 +512,7 @@ class TestSendInput:
         result = send_input("test1234", "test message")
 
         assert result is True
-        mock_tmux.send_keys.assert_called_once_with(
+        mock_Zellij.send_keys.assert_called_once_with(
             "cao-session", "developer-abcd", "test message", enter_count=2
         )
         mock_update.assert_called_once_with("test1234")
@@ -506,30 +529,32 @@ class TestSendInput:
 class TestGetOutput:
     """Tests for get_output function."""
 
-    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
     @patch("cli_agent_orchestrator.services.terminal_service.get_terminal_metadata")
-    def test_get_output_full(self, mock_get_metadata, mock_tmux):
+    def test_get_output_full(self, mock_get_metadata, mock_Zellij):
         """Test getting full output."""
         mock_get_metadata.return_value = {
-            "tmux_session": "cao-session",
-            "tmux_window": "developer-abcd",
+            "session_name": "cao-session",
+            "terminal_name": "developer-abcd",
+            "zellij_tab_id": 1,
         }
-        mock_tmux.get_history.return_value = "full terminal output"
+        mock_Zellij.get_history.return_value = "full terminal output"
 
         result = get_output("test1234", OutputMode.FULL)
 
         assert result == "full terminal output"
 
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
-    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
     @patch("cli_agent_orchestrator.services.terminal_service.get_terminal_metadata")
-    def test_get_output_last(self, mock_get_metadata, mock_tmux, mock_provider_manager):
+    def test_get_output_last(self, mock_get_metadata, mock_Zellij, mock_provider_manager):
         """Test getting last message."""
         mock_get_metadata.return_value = {
-            "tmux_session": "cao-session",
-            "tmux_window": "developer-abcd",
+            "session_name": "cao-session",
+            "terminal_name": "developer-abcd",
+            "zellij_tab_id": 1,
         }
-        mock_tmux.get_history.return_value = "full terminal output"
+        mock_Zellij.get_history.return_value = "full terminal output"
         mock_provider = MagicMock()
         mock_provider.extract_last_message_from_script.return_value = "last message"
         mock_provider_manager.get_provider.return_value = mock_provider
@@ -547,15 +572,16 @@ class TestGetOutput:
             get_output("nonexistent")
 
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
-    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
     @patch("cli_agent_orchestrator.services.terminal_service.get_terminal_metadata")
-    def test_get_output_last_no_provider(self, mock_get_metadata, mock_tmux, mock_provider_manager):
+    def test_get_output_last_no_provider(self, mock_get_metadata, mock_Zellij, mock_provider_manager):
         """Test getting last message when provider not found."""
         mock_get_metadata.return_value = {
-            "tmux_session": "cao-session",
-            "tmux_window": "developer-abcd",
+            "session_name": "cao-session",
+            "terminal_name": "developer-abcd",
+            "zellij_tab_id": 1,
         }
-        mock_tmux.get_history.return_value = "full output"
+        mock_Zellij.get_history.return_value = "full output"
         mock_provider_manager.get_provider.return_value = None
 
         with pytest.raises(ValueError, match="Provider not found"):
@@ -567,37 +593,40 @@ class TestDeleteTerminal:
 
     @patch("cli_agent_orchestrator.services.terminal_service.db_delete_terminal")
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
-    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
     @patch("cli_agent_orchestrator.services.terminal_service.get_terminal_metadata")
     def test_delete_terminal_success(
-        self, mock_get_metadata, mock_tmux, mock_provider_manager, mock_db_delete
+        self, mock_get_metadata, mock_Zellij, mock_provider_manager, mock_db_delete
     ):
         """Test deleting terminal successfully."""
         mock_get_metadata.return_value = {
-            "tmux_session": "cao-session",
-            "tmux_window": "developer-abcd",
+            "session_name": "cao-session",
+            "terminal_name": "developer-abcd",
+            "zellij_tab_id": 1,
         }
         mock_db_delete.return_value = True
 
         result = delete_terminal("test1234")
 
         assert result is True
-        mock_tmux.stop_pipe_pane.assert_called_once()
+        mock_Zellij.stop_log_subscription.assert_called_once_with("test1234")
+        mock_Zellij.kill_window.assert_called_once_with("cao-session", "developer-abcd", 1)
         mock_provider_manager.cleanup_provider.assert_called_once_with("test1234")
 
     @patch("cli_agent_orchestrator.services.terminal_service.db_delete_terminal")
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
-    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
     @patch("cli_agent_orchestrator.services.terminal_service.get_terminal_metadata")
-    def test_delete_terminal_pipe_pane_error(
-        self, mock_get_metadata, mock_tmux, mock_provider_manager, mock_db_delete
+    def test_delete_terminal_start_log_subscription_error(
+        self, mock_get_metadata, mock_Zellij, mock_provider_manager, mock_db_delete
     ):
-        """Test deleting terminal when stop_pipe_pane fails."""
+        """Test deleting terminal when stop_log_subscription fails."""
         mock_get_metadata.return_value = {
-            "tmux_session": "cao-session",
-            "tmux_window": "developer-abcd",
+            "session_name": "cao-session",
+            "terminal_name": "developer-abcd",
+            "zellij_tab_id": 1,
         }
-        mock_tmux.stop_pipe_pane.side_effect = Exception("Pipe error")
+        mock_Zellij.stop_log_subscription.side_effect = Exception("Pipe error")
         mock_db_delete.return_value = True
 
         # Should not raise, just warn

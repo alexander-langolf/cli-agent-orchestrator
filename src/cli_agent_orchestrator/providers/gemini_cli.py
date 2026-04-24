@@ -19,7 +19,7 @@ Key characteristics:
 
 Status Detection Strategy:
     Gemini CLI uses an Ink-based full-screen TUI (not alternate screen), so status
-    is detected by checking the bottom of tmux capture output:
+    is detected by checking the bottom of Zellij history capture output:
     - IDLE: ``*`` placeholder text ("Type your message") visible in bottom input box
     - PROCESSING: ``*`` prefix with user query text (not placeholder) in bottom input box,
       or ``Responding with`` model indicator visible without response completion
@@ -36,7 +36,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from cli_agent_orchestrator.clients.tmux import tmux_client
+from cli_agent_orchestrator.clients.zellij import zellij_client
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import BaseProvider
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
@@ -141,7 +141,7 @@ ERROR_PATTERN = (
 class GeminiCliProvider(BaseProvider):
     """Provider for Gemini CLI tool integration.
 
-    Manages the lifecycle of a Gemini CLI session in a tmux window,
+    Manages the lifecycle of a Gemini CLI session in a Zellij tab,
     including initialization, status detection, response extraction,
     and cleanup. Gemini CLI does not support inline agent profiles —
     if provided, the system prompt is passed via --prompt-interactive flag.
@@ -191,14 +191,14 @@ class GeminiCliProvider(BaseProvider):
     def _build_gemini_command(self) -> str:
         """Build Gemini CLI command with appropriate flags.
 
-        Returns properly escaped shell command string for tmux send_keys.
+        Returns properly escaped shell command string for Zellij send_keys.
         Uses shlex.join() for safe escaping of all arguments.
 
         Command structure:
             gemini --yolo --sandbox false [-i "system prompt"]
 
         The --yolo flag auto-approves all tool actions, which is required for
-        non-interactive operation in CAO-managed tmux sessions.
+        non-interactive operation in CAO-managed Zellij sessions.
 
         System prompt injection uses the ``-i`` (``--prompt-interactive``) flag,
         which sends the system prompt as the first user message and continues in
@@ -237,7 +237,7 @@ class GeminiCliProvider(BaseProvider):
                 system_prompt = self._apply_skill_prompt(system_prompt)
                 if system_prompt:
                     # Write full system prompt to GEMINI.md for persistent context.
-                    working_dir = tmux_client.get_pane_working_directory(
+                    working_dir = zellij_client.get_pane_working_directory(
                         self.session_name, self.window_name
                     )
                     if working_dir:
@@ -389,7 +389,7 @@ class GeminiCliProvider(BaseProvider):
 
         Reads ~/.gemini/settings.json, removes entries that were added by
         _register_mcp_servers(), and writes back. This replaces the previous
-        approach of running ``gemini mcp remove --scope user`` commands via tmux
+        approach of running ``gemini mcp remove --scope user`` commands via Zellij
         (which also spawned Node.js processes).
         """
         if not self._mcp_server_names:
@@ -418,7 +418,7 @@ class GeminiCliProvider(BaseProvider):
         """Initialize Gemini CLI provider by starting the gemini command.
 
         Steps:
-        1. Wait for the shell prompt in the tmux window
+        1. Wait for the shell prompt in the Zellij tab
         2. Build and send the gemini command (may include MCP setup)
         3. Wait for Gemini to reach IDLE state (welcome banner + input box)
 
@@ -428,23 +428,23 @@ class GeminiCliProvider(BaseProvider):
         Raises:
             TimeoutError: If shell or Gemini CLI doesn't start within timeout
         """
-        # Wait for shell prompt to appear in the tmux window
-        if not wait_for_shell(tmux_client, self.session_name, self.window_name, timeout=10.0):
+        # Wait for shell prompt to appear in the Zellij tab
+        if not wait_for_shell(zellij_client, self.session_name, self.window_name, timeout=10.0):
             raise TimeoutError("Shell initialization timed out after 10 seconds")
 
         # Send a warm-up command before launching Gemini.
-        # Gemini's Ink TUI exits silently in freshly-created tmux sessions where
+        # Gemini's Ink TUI exits silently in freshly-created Zellij sessions where
         # the shell environment (PATH, node, nvm, homebrew) is not fully loaded.
         # wait_for_shell() returns when the prompt text stabilizes, but slow
         # shell init scripts (.zshrc, brew shellenv) may still be running.
         # An echo round-trip with output verification ensures the shell has
         # fully processed its init before we launch gemini.
         warmup_marker = "CAO_SHELL_READY"
-        tmux_client.send_keys(self.session_name, self.window_name, f"echo {warmup_marker}")
+        zellij_client.send_keys(self.session_name, self.window_name, f"echo {warmup_marker}")
         warmup_start = time.time()
         warmup_timeout = 15.0
         while time.time() - warmup_start < warmup_timeout:
-            output = tmux_client.get_history(self.session_name, self.window_name)
+            output = zellij_client.get_history(self.session_name, self.window_name)
             if output and warmup_marker in output:
                 break
             time.sleep(0.5)
@@ -461,8 +461,8 @@ class GeminiCliProvider(BaseProvider):
         # Build properly escaped command string
         command = self._build_gemini_command()
 
-        # Send Gemini command to the tmux window
-        tmux_client.send_keys(self.session_name, self.window_name, command)
+        # Send Gemini command to the Zellij tab
+        zellij_client.send_keys(self.session_name, self.window_name, command)
 
         # Wait for Gemini CLI to finish initialization.
         # Gemini takes 10-15+ seconds to load due to Node.js/Ink startup.
@@ -492,7 +492,7 @@ class GeminiCliProvider(BaseProvider):
             time.sleep(1.0)
         else:
             # Capture diagnostic info for debugging initialization failures.
-            diag_output = tmux_client.get_history(self.session_name, self.window_name)
+            diag_output = zellij_client.get_history(self.session_name, self.window_name)
             diag_last_50 = "\n".join((diag_output or "").splitlines()[-50:])
             logger.error(
                 f"Gemini CLI init timeout diagnostic — terminal {self.terminal_id}, "
@@ -521,7 +521,7 @@ class GeminiCliProvider(BaseProvider):
         """Get Gemini CLI status by analyzing terminal output.
 
         Status detection logic:
-        1. Capture tmux pane output (full or tail)
+        1. Capture Zellij pane output (full or tail)
         2. Strip ANSI codes for reliable text matching
         3. Check bottom N lines for the idle prompt pattern (* + placeholder text)
         4. If idle prompt found: distinguish IDLE vs COMPLETED by checking for ✦ response
@@ -534,7 +534,7 @@ class GeminiCliProvider(BaseProvider):
         Returns:
             TerminalStatus indicating current state
         """
-        output = tmux_client.get_history(self.session_name, self.window_name, tail_lines=tail_lines)
+        output = zellij_client.get_history(self.session_name, self.window_name, tail_lines=tail_lines)
 
         if not output:
             return TerminalStatus.ERROR
@@ -604,7 +604,7 @@ class GeminiCliProvider(BaseProvider):
     def get_idle_pattern_for_log(self) -> str:
         """Return Gemini CLI idle prompt pattern for log file monitoring.
 
-        Used by the inbox service for quick IDLE state detection in pipe-pane
+        Used by the inbox service for quick IDLE state detection in subscribe
         log files before calling the full get_status() method.
         """
         return IDLE_PROMPT_PATTERN_LOG
@@ -613,7 +613,7 @@ class GeminiCliProvider(BaseProvider):
     def extraction_retries(self) -> int:
         """Gemini CLI's Ink TUI may show notification spinners for ~10-15s
         after completing a response, temporarily obscuring the response text
-        in the tmux capture buffer.  Retry extraction to wait for spinners
+        in the Zellij history capture buffer.  Retry extraction to wait for spinners
         to clear."""
         return 3
 
@@ -627,7 +627,7 @@ class GeminiCliProvider(BaseProvider):
         4. Filter out status bar, YOLO indicator, and input box chrome
 
         Args:
-            script_output: Raw terminal output from tmux capture
+            script_output: Raw terminal output from Zellij history capture
 
         Returns:
             Extracted response text with ANSI codes stripped
@@ -733,7 +733,7 @@ class GeminiCliProvider(BaseProvider):
         """Get the command to exit Gemini CLI.
 
         Gemini CLI exits via Ctrl+D (EOF). It does not have /quit or /exit commands.
-        We send C-d via tmux, which is the standard EOF signal.
+        We send C-d via Zellij, which is the standard EOF signal.
         """
         return "C-d"
 

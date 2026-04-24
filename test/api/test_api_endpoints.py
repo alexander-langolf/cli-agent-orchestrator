@@ -512,8 +512,8 @@ class TestListTerminalsInSession:
     def test_list_terminals_success(self, client):
         """GET /sessions/{name}/terminals returns terminal list."""
         mock_terminals = [
-            {"id": "abcd1234", "tmux_session": "s1", "provider": "kiro_cli"},
-            {"id": "abcd5678", "tmux_session": "s1", "provider": "claude_code"},
+            {"id": "abcd1234", "session_name": "s1", "provider": "kiro_cli"},
+            {"id": "abcd5678", "session_name": "s1", "provider": "claude_code"},
         ]
         with patch(
             "cli_agent_orchestrator.clients.database.list_terminals_by_session",

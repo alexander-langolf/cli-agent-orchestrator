@@ -10,7 +10,7 @@ The Claude Code provider enables CLI Agent Orchestrator (CAO) to work with **Cla
 
 1. **Anthropic API Key** or **Claude Subscription**: Authentication for Claude Code
 2. **Claude Code CLI**: Install the CLI tool
-3. **tmux**: Required for terminal management
+3. **Zellij**: Required for terminal management
 
 ```bash
 # Install Claude Code CLI
@@ -77,7 +77,7 @@ When launched with an agent profile (e.g., `--agents code_supervisor`), CAO:
 
 1. Loads the profile from the agent store
 2. Extracts the system prompt from the Markdown content
-3. Passes it via `--append-system-prompt` (newlines escaped to `\n` for tmux compatibility)
+3. Passes it via `--append-system-prompt` (newlines escaped to `\n` for Zellij compatibility)
 4. Injects MCP servers via `--mcp-config` JSON if the profile defines `mcpServers`
 
 ### Launch Command
@@ -144,5 +144,5 @@ uv run pytest -m e2e test/e2e/test_supervisor_orchestration.py -v -k ClaudeCode 
    ```
 
 4. **Status Stuck on ERROR**:
-   - Attach to tmux session and check terminal output
+   - Attach to Zellij session and check terminal output
    - Verify Claude Code starts correctly in a regular terminal first

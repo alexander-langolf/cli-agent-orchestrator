@@ -10,7 +10,7 @@ The Kiro CLI provider enables CLI Agent Orchestrator (CAO) to work with **Kiro C
 
 1. **AWS Credentials**: Kiro CLI authenticates via AWS
 2. **Kiro CLI**: Install the CLI tool
-3. **tmux**: Required for terminal management
+3. **Zellij**: Required for terminal management
 
 ```bash
 # Install Kiro CLI

@@ -7,6 +7,7 @@ import time
 import click
 import requests
 
+from cli_agent_orchestrator.clients.zellij import zellij_client
 from cli_agent_orchestrator.constants import (
     API_BASE_URL,
     DEFAULT_PROVIDER,
@@ -182,9 +183,12 @@ def launch(
         click.echo(f"Session created: {terminal['session_name']}")
         click.echo(f"Terminal created: {terminal['name']}")
 
-        # Attach to tmux session unless headless
+        # Attach to Zellij session unless headless.
         if not headless:
-            subprocess.run(["tmux", "attach-session", "-t", terminal["session_name"]])
+            subprocess.run(
+                ["zellij", "attach", terminal["session_name"]],
+                env=zellij_client._build_env(),
+            )
         elif message:
             ready = wait_until_terminal_status(
                 terminal["id"],

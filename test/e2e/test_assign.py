@@ -24,7 +24,7 @@ For real supervisor→worker delegation tests, see test_supervisor_orchestration
 Requires:
 - Running CAO server
 - Authenticated CLI tools (codex, claude, kiro-cli, gemini, copilot)
-- tmux
+- Zellij
 - Agent profiles installed: data_analyst, report_generator
   (install with: cao install examples/assign/data_analyst.md)
 

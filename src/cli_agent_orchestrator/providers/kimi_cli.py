@@ -18,7 +18,7 @@ Key characteristics:
 
 Status Detection Strategy:
     Kimi CLI uses a full-screen TUI (prompt_toolkit), so status is detected by
-    checking the bottom of tmux capture output:
+    checking the bottom of Zellij history capture output:
     - IDLE: Prompt pattern (username@dir💫/✨) visible at bottom, no user input yet
     - PROCESSING: No prompt at bottom (response is streaming)
     - COMPLETED: Prompt at bottom + response content after last user input
@@ -35,7 +35,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from cli_agent_orchestrator.clients.tmux import tmux_client
+from cli_agent_orchestrator.clients.zellij import zellij_client
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import BaseProvider
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
@@ -122,7 +122,7 @@ ERROR_PATTERN = (
 class KimiCliProvider(BaseProvider):
     """Provider for Kimi CLI tool integration.
 
-    Manages the lifecycle of a Kimi CLI session in a tmux window,
+    Manages the lifecycle of a Kimi CLI session in a Zellij tab,
     including initialization, status detection, response extraction,
     and cleanup. Kimi CLI agent profiles are optional — if not provided,
     Kimi uses its built-in default agent.
@@ -151,7 +151,7 @@ class KimiCliProvider(BaseProvider):
         self._temp_dir: Optional[str] = None
         # Latching flag: set True when user input box (╭─) is detected in ANY
         # get_status() call. Persists even after the box scrolls out of the
-        # tmux capture window (200 lines). This is needed because:
+        # Zellij history capture window (200 lines). This is needed because:
         # 1. Long responses push the user input box out of capture range
         # 2. Not all responses use • bullets (tables, numbered lists, etc.)
         # Without this, get_status() returns IDLE instead of COMPLETED after
@@ -166,7 +166,7 @@ class KimiCliProvider(BaseProvider):
     def _build_kimi_command(self) -> str:
         """Build Kimi CLI command with agent profile and MCP config if provided.
 
-        Returns properly escaped shell command string for tmux send_keys.
+        Returns properly escaped shell command string for Zellij send_keys.
         Uses shlex.join() for safe escaping of all arguments.
 
         Command structure:
@@ -177,10 +177,10 @@ class KimiCliProvider(BaseProvider):
         Each provider instance gets its own temp directory to avoid conflicts.
 
         The ``TERM=xterm-256color`` override is needed because Kimi CLI v1.20.0+
-        silently exits when TERM=tmux-256color (the tmux default).
+        silently exits when the Zellij-provided TERM value is used.
 
         The --yolo flag auto-approves all tool actions, which is required for
-        non-interactive operation in CAO-managed tmux sessions.
+        non-interactive operation in CAO-managed Zellij sessions.
         """
         command_parts = ["kimi", "--yolo"]
 
@@ -265,7 +265,7 @@ class KimiCliProvider(BaseProvider):
             except Exception as e:
                 raise ProviderError(f"Failed to load agent profile '{self._agent_profile}': {e}")
 
-        # cd to unique temp dir (per-directory lock) + set TERM for tmux compatibility
+        # cd to unique temp dir (per-directory lock) + set TERM for Zellij compatibility
         kimi_cmd = shlex.join(command_parts)
         return f"cd {shlex.quote(self._temp_dir)} && TERM=xterm-256color {kimi_cmd}"
 
@@ -323,7 +323,7 @@ class KimiCliProvider(BaseProvider):
         """Initialize Kimi CLI provider by starting the kimi command.
 
         Steps:
-        1. Wait for the shell prompt in the tmux window
+        1. Wait for the shell prompt in the Zellij tab
         2. Build and send the kimi command
         3. Wait for Kimi to reach IDLE state (welcome banner + prompt)
 
@@ -333,15 +333,15 @@ class KimiCliProvider(BaseProvider):
         Raises:
             TimeoutError: If shell or Kimi CLI doesn't start within timeout
         """
-        # Wait for shell prompt to appear in the tmux window
-        if not wait_for_shell(tmux_client, self.session_name, self.window_name, timeout=10.0):
+        # Wait for shell prompt to appear in the Zellij tab
+        if not wait_for_shell(zellij_client, self.session_name, self.window_name, timeout=10.0):
             raise TimeoutError("Shell initialization timed out after 10 seconds")
 
         # Build properly escaped command string
         command = self._build_kimi_command()
 
-        # Send Kimi command to the tmux window
-        tmux_client.send_keys(self.session_name, self.window_name, command)
+        # Send Kimi command to the Zellij tab
+        zellij_client.send_keys(self.session_name, self.window_name, command)
 
         # Wait for Kimi CLI to reach IDLE or COMPLETED state (prompt visible).
         # Accept both IDLE and COMPLETED — some CLI versions show a startup
@@ -363,7 +363,7 @@ class KimiCliProvider(BaseProvider):
         """Get Kimi CLI status by analyzing terminal output.
 
         Status detection logic:
-        1. Capture tmux pane output (full or tail)
+        1. Capture Zellij pane output (full or tail)
         2. Strip ANSI codes for reliable text matching
         3. Latch ``_has_received_input`` when user input box (╭─) is detected
         4. Check bottom N lines for the idle prompt pattern
@@ -374,7 +374,7 @@ class KimiCliProvider(BaseProvider):
 
         The latching flag approach is necessary because:
         - Long responses (>200 lines) push the user input box out of the
-          tmux capture window, so checking for ╭─ on every call is unreliable
+          Zellij history capture window, so checking for ╭─ on every call is unreliable
         - Not all responses use ``•`` bullets (structured output like tables,
           numbered lists, report templates have no bullet markers at all)
         - The flag is set during the PROCESSING phase when the user input box
@@ -386,7 +386,7 @@ class KimiCliProvider(BaseProvider):
         Returns:
             TerminalStatus indicating current state
         """
-        output = tmux_client.get_history(self.session_name, self.window_name, tail_lines=tail_lines)
+        output = zellij_client.get_history(self.session_name, self.window_name, tail_lines=tail_lines)
 
         if not output:
             return TerminalStatus.ERROR
@@ -455,7 +455,7 @@ class KimiCliProvider(BaseProvider):
     def get_idle_pattern_for_log(self) -> str:
         """Return Kimi CLI idle prompt pattern for log file monitoring.
 
-        Used by the inbox service for quick IDLE state detection in pipe-pane
+        Used by the inbox service for quick IDLE state detection in subscribe
         log files before calling the full get_status() method.
         """
         return IDLE_PROMPT_PATTERN_LOG
@@ -480,7 +480,7 @@ class KimiCliProvider(BaseProvider):
         - Filter out thinking/status bar lines
 
         Args:
-            script_output: Raw terminal output from tmux capture
+            script_output: Raw terminal output from Zellij history capture
 
         Returns:
             Extracted response text with ANSI codes stripped
@@ -575,7 +575,7 @@ class KimiCliProvider(BaseProvider):
         """Fallback extraction when user input box has scrolled out of capture.
 
         For long responses (>200 lines), the user input box (╭─/╰─) and early
-        response content are no longer in the tmux capture window. In this case,
+        response content are no longer in the Zellij history capture window. In this case,
         extract all content from the start of capture up to the last idle prompt,
         filtering out status bar and welcome banner lines.
 

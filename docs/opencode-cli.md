@@ -15,7 +15,7 @@ The OpenCode CLI provider enables CLI Agent Orchestrator (CAO) to work with **Op
    curl -fsSL https://opencode.ai/install | bash
    ```
 2. **Node.js 18+** — required by OpenCode for its plugin system
-3. **tmux 3.3+** — required by CAO for terminal management
+3. **Zellij >=0.44.1** — required by CAO for terminal management
 4. **API credentials** — configure whichever model provider you want OpenCode to use (Anthropic, OpenAI, etc.) per [OpenCode's auth docs](https://opencode.ai/docs/auth)
 
 ### First-launch delay
@@ -138,7 +138,7 @@ OpenCode auto-discovers `<OPENCODE_CONFIG_DIR>/skills/` and makes its contents a
 
 ## Status Detection
 
-The provider detects terminal state from the tmux capture buffer (ANSI-stripped):
+The provider detects terminal state from the Zellij capture buffer (ANSI-stripped):
 
 | State | Marker |
 |---|---|
@@ -160,7 +160,7 @@ The agent ID is the slash-sanitized form of the profile name (`/` → `__`) — 
 
 Reinstalling an agent whose profile no longer declares `mcpServers` explicitly removes its `agent.<agent_id>` entry from `opencode.json`, so previously-granted MCP tools do not survive as stale grants.
 
-`CAO_TERMINAL_ID` is **not** written to `opencode.json`. OpenCode spawns MCP subprocesses that inherit the tmux window's environment, so the terminal ID propagates naturally — the same mechanism Kiro uses.
+`CAO_TERMINAL_ID` is **not** written to `opencode.json`. OpenCode spawns MCP subprocesses that inherit the Zellij tab's environment, so the terminal ID propagates naturally — the same mechanism Kiro uses.
 
 ## End-to-End Testing
 
@@ -194,11 +194,11 @@ OpenCode's config merge precedence places a project-local `opencode.json` in the
 
 **Workaround:** remove or rename the project-local `opencode.json` before launching CAO, or move it under `.opencode/` (a subdirectory OpenCode also searches but at a lower priority level).
 
-### Scrolling enters tmux copy mode
+### Scrolling enters Zellij copy mode
 
-When you scroll (mouse wheel or trackpad) inside a CAO-managed OpenCode terminal, tmux enters copy mode instead of scrolling the TUI conversation history. This is intentional.
+When you scroll (mouse wheel or trackpad) inside a CAO-managed OpenCode terminal, Zellij enters copy mode instead of scrolling the TUI conversation history. This is intentional.
 
-CAO launches OpenCode with `OPENCODE_DISABLE_MOUSE=1`, which prevents OpenCode from requesting application mouse-reporting mode (`\x1b[?1000h`). Without that request, tmux does not forward scroll events to the OpenCode process — it intercepts them and enters copy mode instead.
+CAO launches OpenCode with `OPENCODE_DISABLE_MOUSE=1`, which prevents OpenCode from requesting application mouse-reporting mode (`\x1b[?1000h`). Without that request, Zellij does not forward scroll events to the OpenCode process — it intercepts them and enters copy mode instead.
 
 The reason for this trade-off: if OpenCode owned scroll events, scrolling the conversation history would move the completion marker (`▣ <agent> · <model> · Ns`) off screen. The footer (`ctrl+p commands`, `esc interrupt`) is pinned to the bottom of the TUI and remains visible regardless of scroll position, so IDLE and PROCESSING detection are unaffected. But COMPLETED detection requires both the completion marker and the idle footer to be present simultaneously in the captured frame — if the marker has scrolled away, CAO never detects COMPLETED even after the agent finishes. Disabling mouse keeps the frame locked to the most recent render.
 
@@ -237,11 +237,11 @@ OpenCode itself handles model authentication. Verify your credentials are set fo
 
 CAO emits only `allow` or `deny` in the permission frontmatter, so `△ Permission required` should not appear for CAO-managed tools. If it does:
 1. Verify the profile's `allowedTools` / `role` grants the tool in question and reinstall — CAO translates allowed tools directly to `permission: allow`.
-2. If the prompt comes from a tool outside CAO's vocabulary, respond to it manually in the tmux window, or use `--yolo` to disable all restrictions **(DANGEROUS — allows any command including `aws`, `rm`, `curl`)**.
+2. If the prompt comes from a tool outside CAO's vocabulary, respond to it manually in the Zellij tab, or use `--yolo` to disable all restrictions **(DANGEROUS — allows any command including `aws`, `rm`, `curl`)**.
 
 ### Status stuck as `PROCESSING`
 
 This can happen if:
 - OpenCode launched but the TUI hasn't painted yet (transient — the poller recovers)
 - A `node_modules` install is still in progress (wait up to 120s)
-- The `opencode` binary isn't on PATH in the tmux window's shell (check `echo $PATH` inside tmux)
+- The `opencode` binary isn't on PATH in the Zellij tab's shell (check `echo $PATH` inside Zellij)

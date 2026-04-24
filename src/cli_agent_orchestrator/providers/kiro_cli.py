@@ -22,7 +22,7 @@ import re
 import shlex
 from typing import Optional
 
-from cli_agent_orchestrator.clients.tmux import tmux_client
+from cli_agent_orchestrator.clients.zellij import zellij_client
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import BaseProvider
 from cli_agent_orchestrator.utils.terminal import wait_for_shell, wait_until_status
@@ -88,13 +88,13 @@ ERROR_INDICATORS = ["Kiro is having trouble responding right now"]
 class KiroCliProvider(BaseProvider):
     """Provider for Kiro CLI tool integration.
 
-    This provider manages the lifecycle of a Kiro CLI chat session within a tmux window,
+    This provider manages the lifecycle of a Kiro CLI chat session within a Zellij tab,
     including initialization, status detection, and response extraction.
 
     Attributes:
         terminal_id: Unique identifier for this terminal instance
-        session_name: Name of the tmux session containing this terminal
-        window_name: Name of the tmux window for this terminal
+        session_name: Name of the Zellij session containing this terminal
+        window_name: Name of the Zellij tab for this terminal
         _agent_profile: Name of the Kiro agent profile to use
         _idle_prompt_pattern: Regex pattern for detecting IDLE state
         _permission_prompt_pattern: Regex pattern for detecting permission prompts
@@ -112,8 +112,8 @@ class KiroCliProvider(BaseProvider):
 
         Args:
             terminal_id: Unique identifier for this terminal
-            session_name: Name of the tmux session
-            window_name: Name of the tmux window
+            session_name: Name of the Zellij session
+            window_name: Name of the Zellij tab
             agent_profile: Name of the Kiro agent profile to use (e.g., "developer")
             allowed_tools: Optional list of CAO tool names the agent is allowed to use
         """
@@ -145,7 +145,7 @@ class KiroCliProvider(BaseProvider):
         """Initialize Kiro CLI provider by starting kiro-cli chat command.
 
         This method:
-        1. Waits for the shell to be ready in the tmux window
+        1. Waits for the shell to be ready in the Zellij tab
         2. Sends the kiro-cli chat command with the configured agent profile
         3. Waits for the agent to reach IDLE state (ready for input)
 
@@ -155,16 +155,16 @@ class KiroCliProvider(BaseProvider):
         Raises:
             TimeoutError: If shell or Kiro CLI initialization times out
         """
-        # Step 1: Wait for shell prompt to appear in the tmux window
+        # Step 1: Wait for shell prompt to appear in the Zellij tab
         # This ensures the terminal is ready before we send commands
-        if not wait_for_shell(tmux_client, self.session_name, self.window_name, timeout=10.0):
+        if not wait_for_shell(zellij_client, self.session_name, self.window_name, timeout=10.0):
             raise TimeoutError("Shell initialization timed out after 10 seconds")
 
         # Step 2: Start the Kiro CLI chat session using kiro-cli's default UI.
         # Detection code handles both legacy and TUI patterns (stateless).
         # If initialization fails, fall back to --legacy-ui.
         command = shlex.join(["kiro-cli", "chat", "--agent", self._agent_profile])
-        tmux_client.send_keys(self.session_name, self.window_name, command)
+        zellij_client.send_keys(self.session_name, self.window_name, command)
 
         # Step 3: Wait for Kiro CLI to fully initialize and show the agent prompt.
         # Accept both IDLE and COMPLETED — some CLI versions show a startup
@@ -175,13 +175,13 @@ class KiroCliProvider(BaseProvider):
             # TUI mode failed — fall back to --legacy-ui
             logger.warning("Kiro CLI TUI initialization timed out, retrying with --legacy-ui")
             # Exit the current session and start fresh with --legacy-ui
-            tmux_client.send_keys(self.session_name, self.window_name, "/exit")
-            if not wait_for_shell(tmux_client, self.session_name, self.window_name, timeout=10.0):
+            zellij_client.send_keys(self.session_name, self.window_name, "/exit")
+            if not wait_for_shell(zellij_client, self.session_name, self.window_name, timeout=10.0):
                 raise TimeoutError("Shell recovery timed out after --legacy-ui fallback")
             legacy_command = shlex.join(
                 ["kiro-cli", "chat", "--legacy-ui", "--agent", self._agent_profile]
             )
-            tmux_client.send_keys(self.session_name, self.window_name, legacy_command)
+            zellij_client.send_keys(self.session_name, self.window_name, legacy_command)
             if not wait_until_status(
                 self, {TerminalStatus.IDLE, TerminalStatus.COMPLETED}, timeout=30.0
             ):
@@ -203,13 +203,13 @@ class KiroCliProvider(BaseProvider):
 
         Args:
             tail_lines: Number of lines to capture from terminal history.
-                        If None, uses default from tmux_client.
+                        If None, uses default from zellij_client.
 
         Returns:
             Current TerminalStatus enum value
         """
         logger.debug(f"get_status: tail_lines={tail_lines}")
-        output = tmux_client.get_history(self.session_name, self.window_name, tail_lines=tail_lines)
+        output = zellij_client.get_history(self.session_name, self.window_name, tail_lines=tail_lines)
 
         # No output indicates a terminal error
         if not output:

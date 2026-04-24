@@ -6,7 +6,7 @@ How to write tests for a new CAO provider. Tests follow a consistent structure a
 
 ```
 test/providers/
-├── test_new_cli_unit.py           # Unit tests (fast, mocked tmux)
+├── test_new_cli_unit.py           # Unit tests (fast, mocked Zellij)
 ├── test_new_cli_coverage.py       # Additional coverage tests (optional)
 ├── fixtures/
 │   ├── new_cli_idle.txt           # Terminal output when CLI is idle
@@ -19,28 +19,29 @@ test/providers/
 
 ## Creating Fixtures
 
-Capture real terminal output from the CLI tool. Use tmux's capture-pane:
+Capture real terminal output from the CLI tool. Use Zellij's dump-screen:
 
 ```bash
-# Start the CLI in tmux
-tmux new-session -d -s test
-tmux send-keys -t test "new-cli" Enter
+# Start a detached Zellij session and launch the CLI in a tab
+zellij attach -b test
+zellij --session test action new-tab -n new-cli -- new-cli
 
 # After CLI is idle, capture
-tmux capture-pane -t test -p -S -200 > test/providers/fixtures/new_cli_idle.txt
+zellij --session test action dump-screen --full --ansi > test/providers/fixtures/new_cli_idle.txt
 
 # Send a task, capture during processing
-tmux send-keys -t test "Hello, what is 2+2?" Enter
+zellij --session test action paste "Hello, what is 2+2?"
+zellij --session test action send-keys Enter
 # Quickly capture while spinner is showing
-tmux capture-pane -t test -p -S -200 > test/providers/fixtures/new_cli_processing.txt
+zellij --session test action dump-screen --full --ansi > test/providers/fixtures/new_cli_processing.txt
 
 # Wait for completion, capture
-tmux capture-pane -t test -p -S -200 > test/providers/fixtures/new_cli_completed.txt
+zellij --session test action dump-screen --full --ansi > test/providers/fixtures/new_cli_completed.txt
 ```
 
-Include ANSI codes in fixtures (`-e` flag) for realistic testing:
+Include ANSI codes in fixtures for realistic testing:
 ```bash
-tmux capture-pane -t test -e -p -S -200 > test/providers/fixtures/new_cli_with_ansi.txt
+zellij --session test action dump-screen --full --ansi > test/providers/fixtures/new_cli_with_ansi.txt
 ```
 
 ## Unit Test Structure
@@ -64,17 +65,17 @@ from cli_agent_orchestrator.providers.new_cli import (
 
 
 @pytest.fixture
-def mock_tmux():
-    """Mock tmux_client for unit tests."""
-    with patch("cli_agent_orchestrator.providers.new_cli.tmux_client") as mock:
+def mock_Zellij():
+    """Mock zellij_client for unit tests."""
+    with patch("cli_agent_orchestrator.providers.new_cli.zellij_client") as mock:
         mock.get_history.return_value = ""
         mock.send_keys.return_value = None
         yield mock
 
 
 @pytest.fixture
-def provider(mock_tmux):
-    """Create a provider instance with mocked tmux."""
+def provider(mock_Zellij):
+    """Create a provider instance with mocked Zellij."""
     return NewCliProvider(
         terminal_id="test-123",
         session_name="test-session",
@@ -86,10 +87,10 @@ def provider(mock_tmux):
 # --- Initialization Tests ---
 
 class TestInitialization:
-    def test_successful_init(self, provider, mock_tmux):
+    def test_successful_init(self, provider, mock_Zellij):
         """Provider initializes and waits for idle prompt."""
         # Set up mock to return idle prompt after command is sent
-        mock_tmux.get_history.return_value = "$ \nnew-cli\n> "  # Shell + idle prompt
+        mock_Zellij.get_history.return_value = "$ \nnew-cli\n> "  # Shell + idle prompt
         with patch(
             "cli_agent_orchestrator.providers.new_cli.wait_for_shell", return_value=True
         ), patch(
@@ -99,7 +100,7 @@ class TestInitialization:
         assert result is True
         assert provider._initialized is True
 
-    def test_shell_timeout(self, provider, mock_tmux):
+    def test_shell_timeout(self, provider, mock_Zellij):
         """Provider raises TimeoutError if shell doesn't appear."""
         with patch(
             "cli_agent_orchestrator.providers.new_cli.wait_for_shell", return_value=False
@@ -107,7 +108,7 @@ class TestInitialization:
             with pytest.raises(TimeoutError, match="Shell initialization"):
                 provider.initialize()
 
-    def test_cli_timeout(self, provider, mock_tmux):
+    def test_cli_timeout(self, provider, mock_Zellij):
         """Provider raises TimeoutError if CLI doesn't start."""
         with patch(
             "cli_agent_orchestrator.providers.new_cli.wait_for_shell", return_value=True
@@ -121,34 +122,34 @@ class TestInitialization:
 # --- Status Detection Tests ---
 
 class TestStatusDetection:
-    def test_idle_status(self, provider, mock_tmux):
-        mock_tmux.get_history.return_value = "Welcome to New CLI\n> "
+    def test_idle_status(self, provider, mock_Zellij):
+        mock_Zellij.get_history.return_value = "Welcome to New CLI\n> "
         assert provider.get_status() == TerminalStatus.IDLE
 
-    def test_processing_status(self, provider, mock_tmux):
-        mock_tmux.get_history.return_value = "✽ Thinking..."
+    def test_processing_status(self, provider, mock_Zellij):
+        mock_Zellij.get_history.return_value = "✽ Thinking..."
         assert provider.get_status() == TerminalStatus.PROCESSING
 
-    def test_completed_status(self, provider, mock_tmux):
+    def test_completed_status(self, provider, mock_Zellij):
         """COMPLETED = response marker + idle prompt both present."""
-        mock_tmux.get_history.return_value = "⏺ The answer is 4.\n> "
+        mock_Zellij.get_history.return_value = "⏺ The answer is 4.\n> "
         assert provider.get_status() == TerminalStatus.COMPLETED
 
-    def test_waiting_user_answer(self, provider, mock_tmux):
-        mock_tmux.get_history.return_value = "Allow this action? [Y/n]"
+    def test_waiting_user_answer(self, provider, mock_Zellij):
+        mock_Zellij.get_history.return_value = "Allow this action? [Y/n]"
         assert provider.get_status() == TerminalStatus.WAITING_USER_ANSWER
 
-    def test_error_on_empty_output(self, provider, mock_tmux):
-        mock_tmux.get_history.return_value = ""
+    def test_error_on_empty_output(self, provider, mock_Zellij):
+        mock_Zellij.get_history.return_value = ""
         assert provider.get_status() == TerminalStatus.ERROR
 
-    def test_error_on_no_recognizable_state(self, provider, mock_tmux):
-        mock_tmux.get_history.return_value = "some random text"
+    def test_error_on_no_recognizable_state(self, provider, mock_Zellij):
+        mock_Zellij.get_history.return_value = "some random text"
         assert provider.get_status() == TerminalStatus.ERROR
 
-    def test_completed_takes_priority_over_processing(self, provider, mock_tmux):
+    def test_completed_takes_priority_over_processing(self, provider, mock_Zellij):
         """Critical: old spinner in buffer + idle prompt = COMPLETED, not PROCESSING."""
-        mock_tmux.get_history.return_value = (
+        mock_Zellij.get_history.return_value = (
             "✽ Thinking...\n"  # Old spinner from earlier
             "⏺ The answer is 4.\n"  # Response
             "> "  # Idle prompt

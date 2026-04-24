@@ -15,8 +15,8 @@ def test_create_provider_codex_stores_mapping():
     provider = manager.create_provider(
         ProviderType.CODEX.value,
         terminal_id="t1",
-        tmux_session="s1",
-        tmux_window="w1",
+        session_name="s1",
+        terminal_name="w1",
         agent_profile=None,
     )
 
@@ -29,8 +29,8 @@ def test_create_provider_copilot_stores_mapping():
     provider = manager.create_provider(
         ProviderType.COPILOT_CLI.value,
         terminal_id="t1",
-        tmux_session="s1",
-        tmux_window="w1",
+        session_name="s1",
+        terminal_name="w1",
         agent_profile=None,
     )
 
@@ -44,8 +44,8 @@ def test_create_provider_unknown_type_raises():
         manager.create_provider(
             "unknown",
             terminal_id="t1",
-            tmux_session="s1",
-            tmux_window="w1",
+            session_name="s1",
+            terminal_name="w1",
             agent_profile=None,
         )
 
@@ -57,8 +57,8 @@ def test_get_provider_creates_on_demand_from_metadata():
         "cli_agent_orchestrator.providers.manager.get_terminal_metadata",
         return_value={
             "provider": ProviderType.CODEX.value,
-            "tmux_session": "s1",
-            "tmux_window": "w1",
+            "session_name": "s1",
+            "terminal_name": "w1",
             "agent_profile": None,
         },
     ):
@@ -75,8 +75,8 @@ def test_get_provider_creates_copilot_on_demand_from_metadata():
         "cli_agent_orchestrator.providers.manager.get_terminal_metadata",
         return_value={
             "provider": ProviderType.COPILOT_CLI.value,
-            "tmux_session": "s1",
-            "tmux_window": "w1",
+            "session_name": "s1",
+            "terminal_name": "w1",
             "agent_profile": None,
         },
     ):
@@ -104,8 +104,8 @@ def test_create_provider_q_cli_without_agent_profile_raises():
         manager.create_provider(
             ProviderType.Q_CLI.value,
             terminal_id="t1",
-            tmux_session="s1",
-            tmux_window="w1",
+            session_name="s1",
+            terminal_name="w1",
             agent_profile=None,
         )
 
@@ -117,8 +117,8 @@ def test_create_provider_kiro_cli_without_agent_profile_raises():
         manager.create_provider(
             ProviderType.KIRO_CLI.value,
             terminal_id="t1",
-            tmux_session="s1",
-            tmux_window="w1",
+            session_name="s1",
+            terminal_name="w1",
             agent_profile=None,
         )
 
@@ -131,8 +131,8 @@ def test_create_provider_claude_code():
     provider = manager.create_provider(
         ProviderType.CLAUDE_CODE.value,
         terminal_id="t1",
-        tmux_session="s1",
-        tmux_window="w1",
+        session_name="s1",
+        terminal_name="w1",
         agent_profile=None,
     )
 
@@ -183,15 +183,15 @@ def test_list_providers():
     manager.create_provider(
         ProviderType.CODEX.value,
         terminal_id="t1",
-        tmux_session="s1",
-        tmux_window="w1",
+        session_name="s1",
+        terminal_name="w1",
         agent_profile=None,
     )
     manager.create_provider(
         ProviderType.CLAUDE_CODE.value,
         terminal_id="t2",
-        tmux_session="s2",
-        tmux_window="w2",
+        session_name="s2",
+        terminal_name="w2",
         agent_profile=None,
     )
 

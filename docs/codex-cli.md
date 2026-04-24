@@ -10,7 +10,7 @@ The Codex CLI provider enables CLI Agent Orchestrator (CAO) to work with **Codex
 
 1. **OpenAI API Key** or **ChatGPT Subscription**: Authentication for Codex CLI
 2. **Codex CLI**: Install the CLI tool via npm
-3. **tmux**: Required for terminal management
+3. **Zellij**: Required for terminal management
 
 ```bash
 # Install Codex CLI
@@ -70,7 +70,7 @@ This works for both the label format (`assistant: response`) and Codex's native 
 
 ## Configuration
 
-CAO's Codex provider launches `codex` with tmux-compatible flags and relies on your existing Codex CLI configuration/authentication.
+CAO's Codex provider launches `codex` with Zellij-compatible flags and relies on your existing Codex CLI configuration/authentication.
 
 - `--provider codex` selects the provider.
 - `--agents <name>` specifies the agent profile. When an agent profile with a `system_prompt` is provided, it is injected into Codex as `developer_instructions` via the `-c` config override flag.
@@ -96,10 +96,10 @@ CAO also sets `tool_timeout_sec=600.0` (10 minutes) for each MCP server to allow
 
 ### Launch Flags
 
-The Codex provider automatically adds these flags for tmux compatibility:
+The Codex provider automatically adds these flags for Zellij compatibility:
 
-- `--no-alt-screen`: Runs Codex in inline mode so output stays in normal scrollback, making `tmux capture-pane` reliable
-- `--disable shell_snapshot`: Prevents TTY input conflicts (SIGTTIN) caused by the shell_snapshot subprocess inheriting stdin in tmux
+- `--no-alt-screen`: Runs Codex in inline mode so output stays in normal scrollback, making `Zellij dump-screen` reliable
+- `--disable shell_snapshot`: Prevents TTY input conflicts (SIGTTIN) caused by the shell_snapshot subprocess inheriting stdin in Zellij
 
 ## Workflows
 
@@ -109,7 +109,7 @@ The Codex provider automatically adds these flags for tmux compatibility:
 cao launch --agents codex_developer --provider codex
 ```
 
-In the tmux window, type your prompt at the Codex prompt.
+In the Zellij tab, type your prompt at the Codex prompt.
 
 To get the CAO terminal id (useful for API automation / MCP), run:
 
@@ -186,7 +186,7 @@ PY
 
 2. **Timeout / Hanging Tasks**:
    - Confirm `codex` works in a regular shell (`codex`, then exit)
-   - Attach to the tmux session and check whether Codex is waiting for input/approval
+   - Attach to the Zellij session and check whether Codex is waiting for input/approval
    - Verify your OpenAI API key or ChatGPT subscription and network connectivity
 
 3. **Status Detection Problems**:
@@ -197,7 +197,7 @@ PY
 ## Implementation Notes
 
 - Command building is handled by `CodexProvider._build_codex_command()` which constructs the launch command with flags and optional `developer_instructions`.
-- A warm-up `echo ready` command is sent before launching Codex to prevent immediate exit in fresh tmux sessions.
+- A warm-up `echo ready` command is sent before launching Codex to prevent immediate exit in fresh Zellij sessions.
 - Workspace trust prompts are auto-accepted by `CodexProvider._handle_trust_prompt()` during initialization.
 - Status detection uses a bottom-N-lines approach (`IDLE_PROMPT_TAIL_LINES = 5`) to check the last few lines for the idle prompt, since `--no-alt-screen` mode keeps history in scrollback.
 - `ASSISTANT_PREFIX_PATTERN` matches both `assistant:` (label style) and `•` (Codex bullet style) for detecting assistant responses after user messages.
@@ -261,7 +261,7 @@ test/e2e/
 
 - Running CAO server: `uv run cao-server`
 - Authenticated CLI tools: `codex`, `claude`, `kiro-cli`
-- tmux installed
+- Zellij installed
 - Agent profiles installed: `analysis_supervisor`, `data_analyst`, `report_generator`
   ```bash
   cao install examples/assign/analysis_supervisor.md

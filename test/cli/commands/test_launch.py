@@ -174,7 +174,7 @@ def test_launch_generic_exception():
 
 
 def test_launch_headless_mode():
-    """Test launch in headless mode doesn't attach to tmux."""
+    """Test launch in headless mode doesn't attach to Zellij."""
     runner = CliRunner()
 
     with (

@@ -187,7 +187,7 @@ class TestExitTerminalEndpoint:
     """Test POST /terminals/{terminal_id}/exit endpoint.
 
     Verifies that text commands (e.g., /exit) are sent via send_input()
-    and tmux special key sequences (e.g., C-d) are sent via send_special_key().
+    and Zellij special key sequences (e.g., C-d) are sent via send_special_key().
     """
 
     def test_exit_terminal_text_command(self, client):
@@ -209,7 +209,7 @@ class TestExitTerminalEndpoint:
             mock_svc.send_special_key.assert_not_called()
 
     def test_exit_terminal_special_key(self, client):
-        """Tmux key sequences (e.g., C-d) should use send_special_key."""
+        """Zellij key sequences (e.g., C-d) should use send_special_key."""
         mock_provider = MagicMock()
         mock_provider.exit_cli.return_value = "C-d"
 

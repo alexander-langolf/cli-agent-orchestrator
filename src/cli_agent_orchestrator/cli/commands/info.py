@@ -1,6 +1,6 @@
 """Info command for CLI Agent Orchestrator CLI."""
 
-import subprocess
+import os
 
 import click
 import requests
@@ -20,18 +20,8 @@ def info():
         # Display database path
         click.echo(f"Database path: {DATABASE_FILE}")
 
-        # Try to get current session name from tmux
-        session_name = None
-        try:
-            result = subprocess.run(
-                ["tmux", "display-message", "-p", "#S"],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            session_name = result.stdout.strip()
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            pass
+        # Zellij exposes the active session name to panes.
+        session_name = os.environ.get("ZELLIJ_SESSION_NAME")
 
         if session_name and session_name.startswith(SESSION_PREFIX):
             try:

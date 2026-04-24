@@ -5,13 +5,13 @@ description: Create a new CLI agent provider for CAO (CLI Agent Orchestrator). U
 
 # CAO Provider Creator
 
-Guide for creating a new CLI agent provider for CLI Agent Orchestrator. A "provider" is an adapter that lets CAO interact with a specific CLI-based AI agent through tmux.
+Guide for creating a new CLI agent provider for CLI Agent Orchestrator. A "provider" is an adapter that lets CAO interact with a specific CLI-based AI agent through Zellij.
 
 ## What You're Building
 
 A provider translates between CAO's unified interface and a specific CLI tool's terminal output. It needs to:
 
-1. **Launch** the CLI tool in a tmux window with the right flags
+1. **Launch** the CLI tool in a Zellij tab with the right flags
 2. **Detect status** by parsing terminal output (IDLE, PROCESSING, COMPLETED, ERROR, WAITING_USER_ANSWER)
 3. **Extract responses** from the terminal buffer after the agent finishes
 4. **Clean up** when the terminal is deleted
@@ -82,7 +82,7 @@ from cli_agent_orchestrator.providers.new_cli import NewCliProvider
 # In create_provider():
 elif provider_type == ProviderType.NEW_CLI.value:
     provider = NewCliProvider(
-        terminal_id, tmux_session, tmux_window, agent_profile, allowed_tools
+        terminal_id, session_name, terminal_name, agent_profile, allowed_tools
     )
 ```
 
@@ -127,7 +127,7 @@ Read `references/test-guide.md` for the full test structure. Minimum coverage:
 4. **Regex patterns** — verify each pattern matches expected terminal output
 5. **Edge cases** — ANSI codes, Unicode, long outputs, multiple responses
 
-Use `unittest.mock.patch` to mock `tmux_client`. Create fixture files in `test/providers/fixtures/`.
+Use `unittest.mock.patch` to mock `zellij_client`. Create fixture files in `test/providers/fixtures/`.
 
 ### Step 8: Write e2e tests
 

@@ -3,7 +3,7 @@
 E2E tests require:
 - A running CAO server (cao-server / uvicorn on localhost:9889)
 - The provider CLI tool installed and authenticated (codex, claude, kiro-cli, gemini, copilot)
-- tmux available on the system
+- Zellij available on the system
 
 Run with: uv run pytest -m e2e test/e2e/ -v
 """
@@ -56,10 +56,10 @@ def warmup_mcp_server_cache():
 
 
 @pytest.fixture(scope="session", autouse=True)
-def require_tmux():
-    """Skip all E2E tests if tmux is not installed."""
-    if not shutil.which("tmux"):
-        pytest.skip("tmux not installed")
+def require_zellij():
+    """Skip all E2E tests if Zellij is not installed."""
+    if not shutil.which("zellij"):
+        pytest.skip("Zellij not installed")
 
 
 def _cli_available(command: str) -> bool:

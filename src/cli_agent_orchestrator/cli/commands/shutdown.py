@@ -31,7 +31,7 @@ def _delete_session(name):
 @click.option("--all", "shutdown_all", is_flag=True, help="Shutdown all cao sessions")
 @click.option("--session", help="Shutdown specific session")
 def shutdown(shutdown_all, session):
-    """Shutdown tmux sessions and cleanup terminal records."""
+    """Shutdown Zellij sessions and cleanup terminal records."""
 
     if not shutdown_all and not session:
         raise click.ClickException("Must specify either --all or --session")

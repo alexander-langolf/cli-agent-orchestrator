@@ -22,7 +22,7 @@ test/providers/
 ├── test_codex_provider_unit.py # Codex CLI unit tests (fast, mocked)
 ├── test_gemini_cli_unit.py    # Gemini CLI unit tests (fast, mocked)
 ├── test_base_provider.py       # Base provider abstract interface tests
-├── test_tmux_working_directory.py # TmuxClient working directory tests
+├── test_zellij_client.py            # ZellijClient runtime tests
 ├── test_q_cli_integration.py   # Q CLI integration tests (slow, real Q CLI)
 ├── fixtures/                    # Test fixture files
 │   ├── kiro_cli_*.txt          # Kiro CLI fixtures (default provider)
@@ -109,7 +109,7 @@ test/providers/
 **Requirements:** 
 - Q CLI must be installed (`q` command available)
 - Q CLI must be authenticated (AWS credentials configured)
-- tmux 3.3+ must be installed
+- Zellij 0.44.1+ must be installed
 
 **Agent Setup:**
 The integration tests automatically create a test agent named `agent-q-cli-integration-test` if it doesn't exist. The agent is created at:
@@ -223,11 +223,11 @@ Each includes unit tests (Python 3.10/3.11/3.12) and code quality checks (black,
 ### Unit Test Template
 
 ```python
-@patch("cli_agent_orchestrator.providers.q_cli.tmux_client")
-def test_new_feature(self, mock_tmux):
+@patch("cli_agent_orchestrator.providers.q_cli.Zellij_client")
+def test_new_feature(self, mock_Zellij):
     """Test description."""
     # Setup mock
-    mock_tmux.get_history.return_value = "test output"
+    mock_Zellij.get_history.return_value = "test output"
     
     # Create provider
     provider = QCliProvider("test1234", "test-session", "window-0", "developer")
@@ -245,7 +245,7 @@ def test_new_feature(self, mock_tmux):
 def test_new_integration(self, q_cli_available, test_session_name, cleanup_session):
     """Test description."""
     # Create session
-    tmux_client.create_session(test_session_name, detached=True)
+    Zellij_client.create_session(test_session_name, detached=True)
     window_name = "window-0"
     
     try:
@@ -256,7 +256,7 @@ def test_new_integration(self, q_cli_available, test_session_name, cleanup_sessi
         assert result == expected
     finally:
         # Cleanup
-        tmux_client.kill_session(test_session_name)
+        Zellij_client.kill_session(test_session_name)
 ```
 
 ## Troubleshooting
@@ -276,7 +276,7 @@ uv run python test/providers/fixtures/generate_fixtures.py
 ### Integration Tests Skip
 - Ensure Q CLI is installed: `which q`
 - Ensure Q CLI is authenticated: `q status`
-- Check that tmux is installed: `which tmux`
+- Check that Zellij is installed: `which zellij`
 
 ### Coverage Not 100%
 Run with missing lines report:
@@ -358,7 +358,7 @@ uv run pytest test/providers/test_q_cli_unit.py::TestQCliProviderHandoffScenario
    - Initialization with agent profile
    - Invalid agent profile error handling
    - MCP server configuration
-   - Command verification (`claude` sent to tmux)
+   - Command verification (`claude` sent to Zellij)
 
 2. **Status Detection (10 tests)**
    - IDLE status with old `>` prompt
@@ -419,7 +419,7 @@ uv run pytest test/providers/test_claude_code_unit.py::TestClaudeCodeProviderIni
    - Base command without agent profile
    - Command with agent profile (developer_instructions injection)
    - Double quote escaping in system prompts
-   - Newline escaping for TOML/tmux compatibility
+   - Newline escaping for TOML/Zellij compatibility
    - MCP server config injection via `-c mcp_servers.<name>.<field>`
    - MCP server with environment variables
    - Empty system prompt handling
@@ -583,14 +583,14 @@ Note: Kiro CLI has identical output format to Q CLI, so the test structure and f
 4. **Error Handling**: Tests failed handoff scenarios
 5. **Permission Prompts**: Tests handoffs requiring user approval
 
-## TmuxClient send_keys Tests
+## ZellijClient send_keys Tests
 
-Unit tests for the `TmuxClient.send_keys` method are in `test/clients/test_tmux_send_keys.py`.
+Unit tests for `ZellijClient` are in `test/clients/test_zellij_client.py`.
 
 **8 tests covering:**
 
 1. **Literal mode (3 tests)**
-   - Text chunks use `literal=True` (prevents tmux key interpretation)
+   - Text chunks use `literal=True` (prevents Zellij key interpretation)
    - Final `C-m` (Enter) is NOT sent as literal
    - Commands with single quotes use literal mode (the original bug)
 
@@ -605,10 +605,10 @@ Unit tests for the `TmuxClient.send_keys` method are in `test/clients/test_tmux_
    - Session not found
    - Window not found
 
-### Running TmuxClient Tests
+### Running ZellijClient Tests
 
 ```bash
-uv run pytest test/clients/test_tmux_send_keys.py -v
+uv run pytest test/clients/test_zellij_client.py -v
 ```
 
 ## Launch Command Tests
@@ -620,7 +620,7 @@ Unit tests for the `launch` CLI command are in `test/cli/commands/test_launch.py
 1. **Core functionality (4 tests)**
    - Working directory included in API params
    - Custom session name
-   - Headless mode (no tmux attach)
+   - Headless mode (no Zellij attach)
    - Invalid provider error
 
 2. **Error handling (2 tests)**
@@ -650,4 +650,4 @@ uv run pytest test/cli/commands/test_launch.py -v
 - **Total Test Count:** 511
 - **Coverage:** 84% overall; 96-100% of all provider modules and launch.py
 - **Execution Time:** <5s (unit), <90s (integration)
-- **Test Categories:** 12 (initialization, status label-format, status bullet-format, extraction label-format, extraction bullet-format, command building, patterns, prompts, handoff, edge cases, tmux send_keys, workspace confirmation)
+- **Test Categories:** 12 (initialization, status label-format, status bullet-format, extraction label-format, extraction bullet-format, command building, patterns, prompts, handoff, edge cases, Zellij send_keys, workspace confirmation)

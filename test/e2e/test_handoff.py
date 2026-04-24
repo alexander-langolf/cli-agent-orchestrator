@@ -10,7 +10,7 @@ Tests the worker side of the handoff flow — validates that each provider can:
 NOTE: These tests do NOT test a supervisor agent calling the handoff() MCP tool.
 For real supervisor→worker delegation tests, see test_supervisor_orchestration.py.
 
-Requires: running CAO server, authenticated CLI tools (codex, claude, kiro-cli, gemini, copilot), tmux.
+Requires: running CAO server, authenticated CLI tools (codex, claude, kiro-cli, gemini, copilot), Zellij.
 
 Run:
     uv run pytest -m e2e test/e2e/test_handoff.py -v

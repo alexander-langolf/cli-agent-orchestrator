@@ -7,17 +7,17 @@ Architecture:
 - Messages are queued in the database (inbox table) via send_message MCP tool
 - LogFileHandler monitors terminal log files for changes using watchdog
 - When a terminal becomes idle (detected via log patterns), pending messages are delivered
-- Messages are sent via terminal_service.send_input() which types into the tmux pane
+- Messages are sent via terminal_service.send_input() which types into the Zellij pane
 
 Message Flow:
 1. Agent A calls send_message(terminal_id, message) → message queued in DB
-2. Agent B's terminal log file updates (via tmux pipe-pane)
+2. Agent B's terminal log file updates (via Zellij subscribe)
 3. LogFileHandler.on_modified() triggered → checks for pending messages
 4. If terminal is IDLE and has pending messages → deliver via send_input()
 5. Message status updated to DELIVERED or FAILED
 
 Performance Optimization:
-- Uses fast log tail check before expensive tmux status queries
+- Uses fast log tail check before expensive Zellij status queries
 - Only queries full provider status when idle pattern detected in log
 """
 
@@ -57,7 +57,7 @@ def _get_log_tail(terminal_id: str, lines: int = 100) -> str:
 
 
 def _has_idle_pattern(terminal_id: str) -> bool:
-    """Check if log tail contains idle pattern without expensive tmux calls."""
+    """Check if log tail contains idle pattern without expensive Zellij calls."""
     tail = _get_log_tail(terminal_id)
     if not tail:
         return False

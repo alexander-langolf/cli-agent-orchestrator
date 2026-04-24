@@ -8,7 +8,7 @@ The Kimi CLI provider enables CAO to work with [Kimi Code CLI](https://kimi.com/
 
 - **Kimi CLI**: Install via `brew install kimi-cli` or `uv tool install kimi-cli`
 - **Authentication**: Run `kimi login` (OAuth-based)
-- **tmux 3.3+**
+- **Zellij 0.44.1+**
 
 Verify installation:
 
@@ -28,7 +28,7 @@ cao launch --agents code_supervisor --provider kimi_cli
 
 ## Status Detection
 
-The provider detects Kimi CLI states by analyzing tmux terminal output:
+The provider detects Kimi CLI states by analyzing Zellij terminal output:
 
 | Status | Pattern | Description |
 |--------|---------|-------------|
@@ -106,7 +106,7 @@ Without this override, the supervisor Kimi CLI agent receives a `ToolError("Time
 
 ### CAO_TERMINAL_ID Forwarding
 
-Kimi CLI does not automatically forward parent shell environment variables to MCP subprocesses. The provider explicitly injects `CAO_TERMINAL_ID` into the `env` field of each MCP server config so that tools like `handoff` and `assign` can create new agent windows in the same tmux session (instead of creating separate sessions). Existing `env` entries are preserved, and an existing `CAO_TERMINAL_ID` value is never overwritten.
+Kimi CLI does not automatically forward parent shell environment variables to MCP subprocesses. The provider explicitly injects `CAO_TERMINAL_ID` into the `env` field of each MCP server config so that tools like `handoff` and `assign` can create new agent windows in the same Zellij session (instead of creating separate sessions). Existing `env` entries are preserved, and an existing `CAO_TERMINAL_ID` value is never overwritten.
 
 ## Command Flags
 
@@ -150,7 +150,7 @@ The provider handles several v1.20.0 behavioral changes:
 
 - **Prompt format**: Changed from `user@dirname💫` to bare `💫`. The idle pattern uses an optional prefix.
 - **Input display**: Removed bordered input boxes (`╭─...╰─`). User input now appears inline on the prompt line (`💫 message text`).
-- **TERM variable**: Kimi CLI silently exits when `TERM=tmux-256color` (the tmux default). The provider overrides with `TERM=xterm-256color`.
+- **TERM variable**: Kimi CLI silently exits when the Zellij-provided TERM value is used. The provider overrides with `TERM=xterm-256color`.
 - **Per-directory lock**: Only one Kimi instance can run in a given directory. Each provider instance uses its own temp directory via `cd`.
 
 ## E2E Testing

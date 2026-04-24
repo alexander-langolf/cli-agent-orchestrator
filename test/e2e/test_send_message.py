@@ -12,7 +12,7 @@ NOTE: These tests send messages via the CAO API, not via an agent calling
 the send_message() MCP tool. For real agent-to-agent communication via
 MCP tools, see test_supervisor_orchestration.py.
 
-Requires: running CAO server, authenticated CLI tools (codex, claude, kiro-cli, gemini, copilot), tmux.
+Requires: running CAO server, authenticated CLI tools (codex, claude, kiro-cli, gemini, copilot), Zellij.
 
 Run:
     uv run pytest -m e2e test/e2e/test_send_message.py -v

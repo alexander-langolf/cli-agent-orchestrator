@@ -10,7 +10,7 @@ import re
 import time
 from typing import Optional
 
-from cli_agent_orchestrator.clients.tmux import tmux_client
+from cli_agent_orchestrator.clients.zellij import zellij_client
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import BaseProvider
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
@@ -127,14 +127,14 @@ class NewCliProvider(BaseProvider):
     # ----- Initialize -----
 
     def initialize(self) -> bool:
-        """Start the CLI tool in the tmux window."""
+        """Start the CLI tool in the Zellij tab."""
         # Wait for shell prompt
-        if not wait_for_shell(tmux_client, self.session_name, self.window_name, timeout=10.0):
+        if not wait_for_shell(zellij_client, self.session_name, self.window_name, timeout=10.0):
             raise TimeoutError("Shell initialization timed out")
 
         # Build and send the launch command
         command = self._build_command()
-        tmux_client.send_keys(self.session_name, self.window_name, command)
+        zellij_client.send_keys(self.session_name, self.window_name, command)
 
         # Handle any startup prompts (trust dialog, permission bypass, etc.)
         # self._handle_startup_prompts(timeout=20.0)
@@ -154,12 +154,12 @@ class NewCliProvider(BaseProvider):
     # ----- Status detection -----
 
     def get_status(self, tail_lines: Optional[int] = None) -> TerminalStatus:
-        """Detect terminal state by analyzing tmux output.
+        """Detect terminal state by analyzing Zellij output.
         
         IMPORTANT: Check COMPLETED before PROCESSING to avoid the stale
         buffer problem. See references/lessons-learnt.md #1.
         """
-        output = tmux_client.get_history(
+        output = zellij_client.get_history(
             self.session_name, self.window_name, tail_lines=tail_lines
         )
 
@@ -247,7 +247,7 @@ class NewCliProvider(BaseProvider):
 
 ### Why check COMPLETED before PROCESSING?
 
-The tmux buffer retains old output. A spinner line like `✽ Cooking…` from 5 minutes ago is still in the buffer. If you check PROCESSING first, you'll match the old spinner and never see COMPLETED — even though the agent finished and the idle prompt is at the bottom.
+The Zellij buffer retains old output. A spinner line like `✽ Cooking…` from 5 minutes ago is still in the buffer. If you check PROCESSING first, you'll match the old spinner and never see COMPLETED — even though the agent finished and the idle prompt is at the bottom.
 
 By checking COMPLETED first (response marker + idle prompt), you correctly detect that the agent is done regardless of historical spinners.
 

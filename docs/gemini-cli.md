@@ -2,13 +2,13 @@
 
 ## Overview
 
-The Gemini CLI provider enables CAO to work with [Gemini CLI](https://github.com/google-gemini/gemini-cli), Google's coding agent CLI tool. Gemini CLI runs as an interactive Ink-based TUI (not alternate screen mode) that keeps scrollback history in tmux.
+The Gemini CLI provider enables CAO to work with [Gemini CLI](https://github.com/google-gemini/gemini-cli), Google's coding agent CLI tool. Gemini CLI runs as an interactive Ink-based TUI (not alternate screen mode) that keeps scrollback history in Zellij.
 
 ## Prerequisites
 
 - **Gemini CLI**: Install via `npm install -g @google/gemini-cli` or `npx @google/gemini-cli`
 - **Authentication**: Run `gemini` and follow the OAuth flow, or set `GEMINI_API_KEY`
-- **tmux 3.3+**
+- **Zellij 0.44.1+**
 
 Verify installation:
 
@@ -25,7 +25,7 @@ cao launch --agents code_supervisor --provider gemini_cli
 
 ## Status Detection
 
-The provider detects Gemini CLI states by analyzing tmux terminal output:
+The provider detects Gemini CLI states by analyzing Zellij terminal output:
 
 | Status | Pattern | Description |
 |--------|---------|-------------|
@@ -101,7 +101,7 @@ MCP servers from agent profiles are registered by writing directly to `~/.gemini
 
 ### CAO_TERMINAL_ID Forwarding
 
-`CAO_TERMINAL_ID` is injected into the MCP server's `env` field in `settings.json`. This ensures tools like `handoff` and `assign` create new agent windows in the same tmux session.
+`CAO_TERMINAL_ID` is injected into the MCP server's `env` field in `settings.json`. This ensures tools like `handoff` and `assign` create new agent windows in the same Zellij session.
 
 ### MCP Server Cleanup
 

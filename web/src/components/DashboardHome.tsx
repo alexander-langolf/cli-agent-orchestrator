@@ -321,10 +321,10 @@ export function DashboardHome({ onNavigate }: { onNavigate: (tab: string) => voi
       <ConfirmModal
         open={!!pendingClose}
         title="Close Terminal"
-        message="This will kill the tmux window and terminate the agent process."
+        message="This will kill the Zellij tab and terminate the agent process."
         details={pendingClose ? [
           { label: 'Terminal', value: `${pendingClose.agent_profile || 'default'} (${pendingClose.id})` },
-          { label: 'Session', value: pendingClose.tmux_session },
+          { label: 'Session', value: pendingClose.session_name },
         ] : []}
         confirmLabel="Close Terminal"
         variant="danger"

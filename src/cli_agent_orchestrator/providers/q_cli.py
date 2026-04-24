@@ -5,7 +5,7 @@ import re
 import shlex
 from typing import Optional
 
-from cli_agent_orchestrator.clients.tmux import tmux_client
+from cli_agent_orchestrator.clients.zellij import zellij_client
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import BaseProvider
 from cli_agent_orchestrator.utils.terminal import wait_for_shell, wait_until_status
@@ -51,11 +51,11 @@ class QCliProvider(BaseProvider):
     def initialize(self) -> bool:
         """Initialize Q CLI provider by starting q chat command."""
         # Wait for shell to be ready first
-        if not wait_for_shell(tmux_client, self.session_name, self.window_name, timeout=10.0):
+        if not wait_for_shell(zellij_client, self.session_name, self.window_name, timeout=10.0):
             raise TimeoutError("Shell initialization timed out after 10 seconds")
 
         command = shlex.join(["q", "chat", "--agent", self._agent_profile])
-        tmux_client.send_keys(self.session_name, self.window_name, command)
+        zellij_client.send_keys(self.session_name, self.window_name, command)
 
         if not wait_until_status(
             self, {TerminalStatus.IDLE, TerminalStatus.COMPLETED}, timeout=30.0
@@ -68,7 +68,7 @@ class QCliProvider(BaseProvider):
     def get_status(self, tail_lines: Optional[int] = None) -> TerminalStatus:
         """Get Q CLI status by analyzing terminal output."""
         logger.debug(f"get_status: tail_lines={tail_lines}")
-        output = tmux_client.get_history(self.session_name, self.window_name, tail_lines=tail_lines)
+        output = zellij_client.get_history(self.session_name, self.window_name, tail_lines=tail_lines)
 
         if not output:
             return TerminalStatus.ERROR
@@ -165,7 +165,7 @@ class QCliProvider(BaseProvider):
         """Return Q CLI IDLE prompt pattern for log files."""
         return IDLE_PROMPT_PATTERN_LOG
 
-    # TODO: exit_cli should run the tmux.send_keys directly with /exit or ctrl-c twice
+    # TODO: exit_cli should run the Zellij.send_keys directly with /exit or ctrl-c twice
     def exit_cli(self) -> str:
         """Get the command to exit Q CLI."""
         return "/exit"

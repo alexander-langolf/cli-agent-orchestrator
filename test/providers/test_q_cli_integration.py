@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from cli_agent_orchestrator.clients.tmux import tmux_client
+from cli_agent_orchestrator.clients.zellij import zellij_client
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.q_cli import QCliProvider
 from cli_agent_orchestrator.utils.terminal import wait_for_shell
@@ -69,7 +69,7 @@ def cleanup_session(test_session_name):
     yield
     # Cleanup after test
     try:
-        tmux_client.kill_session(test_session_name)
+        zellij_client.kill_session(test_session_name)
     except Exception:
         pass  # Session may already be cleaned up
 
@@ -81,10 +81,10 @@ class TestQCliProviderIntegration:
         self, ensure_test_agent, test_session_name, cleanup_session
     ):
         """Test real Q CLI initialization flow."""
-        # Create a test tmux session
+        # Create a test Zellij session
         terminal_id = "test1234"
         window_name = "window-0"
-        tmux_client.create_session(test_session_name, window_name, terminal_id)
+        zellij_client.create_session(test_session_name, window_name, terminal_id)
 
         try:
             # Create provider and initialize (using agent from ensure_test_agent fixture)
@@ -103,14 +103,14 @@ class TestQCliProviderIntegration:
 
         finally:
             # Cleanup
-            tmux_client.kill_session(test_session_name)
+            zellij_client.kill_session(test_session_name)
 
     def test_real_q_chat_simple_query(self, ensure_test_agent, test_session_name, cleanup_session):
         """Test real Q CLI with a simple query."""
-        # Create a test tmux session
+        # Create a test Zellij session
         terminal_id = "test1234"
         window_name = "window-0"
-        tmux_client.create_session(test_session_name, window_name, terminal_id)
+        zellij_client.create_session(test_session_name, window_name, terminal_id)
 
         try:
             # Initialize Q CLI (using agent from ensure_test_agent fixture)
@@ -123,7 +123,7 @@ class TestQCliProviderIntegration:
 
             # Send a simple query
             simple_query = "Say 'Hello, integration test!'"
-            tmux_client.send_keys(test_session_name, window_name, simple_query)
+            zellij_client.send_keys(test_session_name, window_name, simple_query)
 
             # Wait for processing
             time.sleep(1)
@@ -144,7 +144,7 @@ class TestQCliProviderIntegration:
             assert status == TerminalStatus.COMPLETED
 
             # Extract and verify the message
-            output = tmux_client.get_history(test_session_name, window_name)
+            output = zellij_client.get_history(test_session_name, window_name)
             message = provider.extract_last_message_from_script(output)
 
             # Message should contain something (not empty)
@@ -153,16 +153,16 @@ class TestQCliProviderIntegration:
 
         finally:
             # Cleanup
-            tmux_client.kill_session(test_session_name)
+            zellij_client.kill_session(test_session_name)
 
     def test_real_q_chat_status_detection(
         self, ensure_test_agent, test_session_name, cleanup_session
     ):
         """Test status detection with real Q CLI output."""
-        # Create a test tmux session
+        # Create a test Zellij session
         terminal_id = "test1234"
         window_name = "window-0"
-        tmux_client.create_session(test_session_name, window_name, terminal_id)
+        zellij_client.create_session(test_session_name, window_name, terminal_id)
 
         try:
             # Initialize Q CLI (using agent from ensure_test_agent fixture)
@@ -174,7 +174,7 @@ class TestQCliProviderIntegration:
             assert provider.get_status() == TerminalStatus.IDLE
 
             # Send a query to trigger PROCESSING/COMPLETED states
-            tmux_client.send_keys(test_session_name, window_name, "What is 2+2?")
+            zellij_client.send_keys(test_session_name, window_name, "What is 2+2?")
 
             # Should be PROCESSING or quickly move to COMPLETED
             time.sleep(1)
@@ -196,19 +196,19 @@ class TestQCliProviderIntegration:
 
             # After some time, should return to IDLE (if we send Enter)
             time.sleep(1)
-            tmux_client.send_keys(test_session_name, window_name, "")
+            zellij_client.send_keys(test_session_name, window_name, "")
             time.sleep(1)
 
         finally:
             # Cleanup
-            tmux_client.kill_session(test_session_name)
+            zellij_client.kill_session(test_session_name)
 
     def test_real_q_chat_exit(self, ensure_test_agent, test_session_name, cleanup_session):
         """Test exiting Q CLI."""
-        # Create a test tmux session
+        # Create a test Zellij session
         terminal_id = "test1234"
         window_name = "window-0"
-        tmux_client.create_session(test_session_name, window_name, terminal_id)
+        zellij_client.create_session(test_session_name, window_name, terminal_id)
 
         try:
             # Initialize Q CLI (using agent from ensure_test_agent fixture)
@@ -220,13 +220,13 @@ class TestQCliProviderIntegration:
 
             # Send exit command
             exit_cmd = provider.exit_cli()
-            tmux_client.send_keys(test_session_name, window_name, exit_cmd)
+            zellij_client.send_keys(test_session_name, window_name, exit_cmd)
 
             # Wait for exit
             time.sleep(2)
 
             # Get the output to verify exit happened
-            output = tmux_client.get_history(test_session_name, window_name)
+            output = zellij_client.get_history(test_session_name, window_name)
 
             # Should not have the Q CLI prompt anymore after exit
             # (This test verifies the exit command works)
@@ -234,16 +234,16 @@ class TestQCliProviderIntegration:
 
         finally:
             # Cleanup
-            tmux_client.kill_session(test_session_name)
+            zellij_client.kill_session(test_session_name)
 
     def test_real_q_chat_with_different_profile(
         self, ensure_test_agent, test_session_name, cleanup_session
     ):
         """Test Q CLI with a different agent profile if available."""
-        # Create a test tmux session
+        # Create a test Zellij session
         terminal_id = "test1234"
         window_name = "window-0"
-        tmux_client.create_session(test_session_name, window_name, terminal_id)
+        zellij_client.create_session(test_session_name, window_name, terminal_id)
 
         try:
             # Try with a different profile (may not exist, that's okay)
@@ -264,7 +264,7 @@ class TestQCliProviderIntegration:
 
         finally:
             # Cleanup
-            tmux_client.kill_session(test_session_name)
+            zellij_client.kill_session(test_session_name)
 
 
 class TestQCliProviderHandoffIntegration:
@@ -274,10 +274,10 @@ class TestQCliProviderHandoffIntegration:
         self, ensure_test_agent, test_session_name, cleanup_session
     ):
         """Test status transitions during a real handoff scenario."""
-        # Create a test tmux session
+        # Create a test Zellij session
         terminal_id = "test1234"
         window_name = "window-0"
-        tmux_client.create_session(test_session_name, window_name, terminal_id)
+        zellij_client.create_session(test_session_name, window_name, terminal_id)
 
         try:
             # Initialize Q CLI with supervisor agent
@@ -292,7 +292,7 @@ class TestQCliProviderHandoffIntegration:
             # Send a query that might trigger handoff-like behavior
             # (Real handoff depends on agent configuration)
             handoff_query = "Please help me with implementing a new feature"
-            tmux_client.send_keys(test_session_name, window_name, handoff_query)
+            zellij_client.send_keys(test_session_name, window_name, handoff_query)
 
             # Monitor status transitions
             statuses = []
@@ -315,7 +315,7 @@ class TestQCliProviderHandoffIntegration:
 
             # Extract the message if completed
             if statuses[-1] == TerminalStatus.COMPLETED:
-                output = tmux_client.get_history(test_session_name, window_name)
+                output = zellij_client.get_history(test_session_name, window_name)
                 message = provider.extract_last_message_from_script(output)
 
                 # Verify message extraction worked
@@ -324,16 +324,16 @@ class TestQCliProviderHandoffIntegration:
 
         finally:
             # Cleanup
-            tmux_client.kill_session(test_session_name)
+            zellij_client.kill_session(test_session_name)
 
     def test_real_handoff_message_integrity(
         self, ensure_test_agent, test_session_name, cleanup_session
     ):
         """Test that message extraction maintains integrity during handoff."""
-        # Create a test tmux session
+        # Create a test Zellij session
         terminal_id = "test1234"
         window_name = "window-0"
-        tmux_client.create_session(test_session_name, window_name, terminal_id)
+        zellij_client.create_session(test_session_name, window_name, terminal_id)
 
         try:
             # Initialize Q CLI
@@ -345,7 +345,7 @@ class TestQCliProviderHandoffIntegration:
 
             # Send a simple query (shorter to avoid buffer truncation)
             query = "Say 'Test message integrity'"
-            tmux_client.send_keys(test_session_name, window_name, query)
+            zellij_client.send_keys(test_session_name, window_name, query)
 
             # Wait for processing to start
             time.sleep(1)
@@ -358,7 +358,7 @@ class TestQCliProviderHandoffIntegration:
                 # Otherwise wait for completion
                 if initial_status != TerminalStatus.PROCESSING:
                     # Debug: print terminal output if not in expected state
-                    debug_output = tmux_client.get_history(test_session_name, window_name)
+                    debug_output = zellij_client.get_history(test_session_name, window_name)
                     print(f"\n=== DEBUG: Unexpected initial status ===")
                     print(f"Status: {initial_status}")
                     print(f"Terminal output:\n{debug_output}")
@@ -381,7 +381,7 @@ class TestQCliProviderHandoffIntegration:
 
                 if status != TerminalStatus.COMPLETED:
                     # Debug: print terminal output on failure
-                    debug_output = tmux_client.get_history(test_session_name, window_name)
+                    debug_output = zellij_client.get_history(test_session_name, window_name)
                     print(f"\n=== DEBUG: Test failed ===")
                     print(f"Final status: {status}")
                     print(f"Status history: {status_history}")
@@ -393,7 +393,7 @@ class TestQCliProviderHandoffIntegration:
                 ), f"Expected COMPLETED but got {status} after {elapsed} seconds. Status history: {status_history}"
 
             # Get the output
-            output = tmux_client.get_history(test_session_name, window_name)
+            output = zellij_client.get_history(test_session_name, window_name)
 
             # Extract message and verify indices weren't corrupted
             message = provider.extract_last_message_from_script(output)
@@ -411,7 +411,7 @@ class TestQCliProviderHandoffIntegration:
 
         finally:
             # Cleanup
-            tmux_client.kill_session(test_session_name)
+            zellij_client.kill_session(test_session_name)
 
 
 class TestQCliProviderWorkingDirectory:
@@ -430,21 +430,23 @@ class TestQCliProviderWorkingDirectory:
     ):
         """Test that terminal starts in specified working directory."""
         # Create session with custom working directory
-        window_name = tmux_client.create_session(
+        terminal = zellij_client.create_session(
             test_session_name, "test-window", "test-term-id", working_directory=str(home_tmp_path)
         )
 
         # Query the working directory
-        actual_dir = tmux_client.get_pane_working_directory(test_session_name, window_name)
+        actual_dir = zellij_client.get_pane_working_directory(
+            test_session_name, terminal.name, terminal.launch_working_directory
+        )
 
         assert actual_dir == str(home_tmp_path.resolve())
 
     def test_working_directory_changes_are_detected(
         self, test_session_name, cleanup_session, home_tmp_path
     ):
-        """Test that directory changes in terminal are detected."""
+        """Test that Zellij returns the launch directory, not live shell cwd."""
         # Create session
-        window_name = tmux_client.create_session(
+        terminal = zellij_client.create_session(
             test_session_name, "test-window", "test-term-id", working_directory=str(home_tmp_path)
         )
 
@@ -452,17 +454,19 @@ class TestQCliProviderWorkingDirectory:
         subdir = home_tmp_path / "subdir"
         subdir.mkdir()
 
-        # Change directory in tmux pane
+        # Change directory in Zellij pane
         # wait_for_shell ensures shell is initialized before sending commands
         # (paste-buffer delivery is instant, so shell must be ready first)
-        wait_for_shell(tmux_client, test_session_name, window_name, timeout=10.0)
-        tmux_client.send_keys(test_session_name, window_name, f"cd {subdir}")
+        wait_for_shell(zellij_client, test_session_name, terminal.name, timeout=10.0)
+        zellij_client.send_keys(test_session_name, terminal.name, f"cd {subdir}")
         time.sleep(0.5)  # Wait for command to execute
 
         # Query working directory
-        actual_dir = tmux_client.get_pane_working_directory(test_session_name, window_name)
+        actual_dir = zellij_client.get_pane_working_directory(
+            test_session_name, terminal.name, terminal.launch_working_directory
+        )
 
-        assert actual_dir == str(subdir.resolve())
+        assert actual_dir == str(home_tmp_path.resolve())
 
     def test_symlink_resolution(self, test_session_name, cleanup_session, home_tmp_path):
         """Test that symlinks are resolved to real paths."""
@@ -473,12 +477,14 @@ class TestQCliProviderWorkingDirectory:
         link_dir.symlink_to(real_dir)
 
         # Create session with symlink path
-        window_name = tmux_client.create_session(
+        terminal = zellij_client.create_session(
             test_session_name, "test-window", "test-term-id", working_directory=str(link_dir)
         )
 
         # Should resolve to real path
-        actual_dir = tmux_client.get_pane_working_directory(test_session_name, window_name)
+        actual_dir = zellij_client.get_pane_working_directory(
+            test_session_name, terminal.name, terminal.launch_working_directory
+        )
 
         assert actual_dir == str(real_dir.resolve())
 
@@ -500,7 +506,7 @@ class TestQCliProviderIntegrationErrorHandling:
         provider = QCliProvider("test1234", "non-existent-session", "window-0", "developer")
 
         # Should handle gracefully (likely return ERROR status)
-        # The exact behavior depends on tmux_client implementation
+        # The exact behavior depends on zellij_client implementation
         try:
             status = provider.get_status()
             # If it doesn't raise an exception, it should return ERROR

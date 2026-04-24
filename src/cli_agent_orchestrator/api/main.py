@@ -20,6 +20,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field, field_validator
 from watchdog.observers.polling import PollingObserver
 
+from cli_agent_orchestrator.clients.zellij import zellij_client
 from cli_agent_orchestrator.clients.database import (
     create_inbox_message,
     get_inbox_messages,
@@ -501,9 +502,9 @@ async def exit_terminal(terminal_id: TerminalId) -> Dict:
         if provider is None:
             raise ValueError(f"Provider not found for terminal {terminal_id}")
         exit_command = provider.exit_cli()
-        # Some providers use tmux key sequences (e.g., "C-d" for Ctrl+D) instead
+        # Some providers use key sequences (e.g., "C-d" for Ctrl+D) instead
         # of text commands (e.g., "/exit"). Key sequences must be sent via
-        # send_special_key() to be interpreted by tmux, not as literal text.
+        # send_special_key() to be interpreted by the terminal runtime, not as literal text.
         if exit_command.startswith(("C-", "M-")):
             terminal_service.send_special_key(terminal_id, exit_command)
         else:
@@ -640,7 +641,7 @@ async def get_inbox_messages_endpoint(
 
 @app.websocket("/terminals/{terminal_id}/ws")
 async def terminal_ws(websocket: WebSocket, terminal_id: str):
-    """WebSocket endpoint for live terminal streaming via tmux attach.
+    """WebSocket endpoint for live terminal streaming via Zellij attach.
 
     Security: This endpoint provides full PTY access with no authentication.
     It is intended for localhost-only use. Do NOT expose the server to
@@ -659,24 +660,25 @@ async def terminal_ws(websocket: WebSocket, terminal_id: str):
         await websocket.close(code=4004, reason="Terminal not found")
         return
 
-    session_name = metadata["tmux_session"]
-    window_name = metadata["tmux_window"]
+    session_name = metadata["session_name"]
+    zellij_client.focus_tab(session_name, metadata["zellij_tab_id"])
 
-    # Create PTY pair for tmux attach
+    # Create PTY pair for Zellij attach
     master_fd, slave_fd = pty.openpty()
 
     # Set initial terminal size
     winsize = struct.pack("HHHH", 24, 80, 0, 0)
     fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, winsize)
 
-    # Start tmux attach inside the PTY
+    # Start Zellij attach inside the PTY
     proc = subprocess.Popen(
-        ["tmux", "-u", "attach-session", "-t", f"{session_name}:{window_name}"],
+        ["zellij", "attach", session_name],
         stdin=slave_fd,
         stdout=slave_fd,
         stderr=slave_fd,
         close_fds=True,
         preexec_fn=os.setsid,
+        env=zellij_client._build_env(),
     )
     os.close(slave_fd)
 
@@ -740,7 +742,7 @@ async def terminal_ws(websocket: WebSocket, terminal_id: str):
                     cols = payload.get("cols", 80)
                     winsize_data = struct.pack("HHHH", rows, cols, 0, 0)
                     fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize_data)
-                    # Explicitly notify tmux of the size change —
+                    # Explicitly notify Zellij of the size change —
                     # TIOCSWINSZ on the master doesn't always deliver
                     # SIGWINCH to the child process group.
                     try:
@@ -768,7 +770,7 @@ async def terminal_ws(websocket: WebSocket, terminal_id: str):
             os.close(master_fd)
         except OSError:
             pass
-        # Terminate tmux attach (just detaches, doesn't kill the session)
+        # Terminate Zellij attach (just detaches, doesn't kill the session)
         proc.terminate()
         try:
             await asyncio.wait_for(asyncio.to_thread(proc.wait), timeout=3.0)

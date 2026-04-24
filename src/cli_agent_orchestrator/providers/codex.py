@@ -6,7 +6,7 @@ import shlex
 import time
 from typing import Optional
 
-from cli_agent_orchestrator.clients.tmux import tmux_client
+from cli_agent_orchestrator.clients.zellij import zellij_client
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import BaseProvider
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
@@ -22,12 +22,12 @@ IDLE_PROMPT_PATTERN = r"(?:❯|›|codex>)"
 # so we can't anchor to \Z. Instead, check the last few lines where the prompt
 # and status bar appear.
 IDLE_PROMPT_TAIL_LINES = 5
-# The idle prompt character ❯ (U+276F) is rendered on-screen by capture-pane
-# but is NOT written to the raw output stream captured by pipe-pane.  Instead,
+# The idle prompt character ❯ (U+276F) is rendered on-screen by dump-screen
+# but is NOT always written to the raw log stream from subscribe. Instead,
 # the TUI footer text "? for shortcuts" is reliably present whenever the TUI
 # is active.  This is intentionally permissive — _has_idle_pattern() is a
 # lightweight pre-check; the real status decision is made by get_status()
-# which uses capture-pane (rendered screen).
+# which uses dump-screen (rendered screen).
 IDLE_PROMPT_PATTERN_LOG = r"\? for shortcuts"
 # Match assistant response start: "assistant:/codex:/agent:" (label style from synthetic
 # test fixtures) or "•" bullet point (real Codex interactive output format).
@@ -130,12 +130,12 @@ class CodexProvider(BaseProvider):
     def _build_codex_command(self) -> str:
         """Build Codex command with agent profile if provided.
 
-        Returns properly escaped shell command string that can be safely sent via tmux.
+        Returns a properly escaped shell command string.
         Uses codex's -c developer_instructions flag to inject agent system prompts.
         """
         # --yolo (alias for --dangerously-bypass-approvals-and-sandbox):
         # bypass approval prompts and sandboxing. CAO agents run in
-        # non-interactive tmux sessions where interactive approval prompts
+        # non-interactive terminal sessions where interactive approval prompts
         # block handoff/assign flows. This mirrors Claude Code's
         # --dangerously-skip-permissions and Gemini CLI's --yolo flags.
         command_parts = ["codex", "--yolo", "--no-alt-screen", "--disable", "shell_snapshot"]
@@ -164,7 +164,7 @@ class CodexProvider(BaseProvider):
                     # Codex accepts developer_instructions via -c config override.
                     # This is injected as a developer role message before AGENTS.md content.
                     # Escape backslashes, double quotes, and newlines for TOML basic string.
-                    # Newlines must become literal \n to prevent tmux send_keys from
+                    # Newlines must become literal \n to prevent terminal input from
                     # splitting the command across multiple lines.
                     escaped_prompt = (
                         system_prompt.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
@@ -222,7 +222,7 @@ class CodexProvider(BaseProvider):
         """
         start_time = time.time()
         while time.time() - start_time < timeout:
-            output = tmux_client.get_history(self.session_name, self.window_name)
+            output = zellij_client.get_history(self.session_name, self.window_name)
             if not output:
                 time.sleep(1.0)
                 continue
@@ -232,11 +232,7 @@ class CodexProvider(BaseProvider):
 
             if re.search(TRUST_PROMPT_PATTERN, clean_output):
                 logger.info("Codex workspace trust prompt detected, auto-accepting")
-                session = tmux_client.server.sessions.get(session_name=self.session_name)
-                window = session.windows.get(window_name=self.window_name)
-                pane = window.active_pane
-                if pane:
-                    pane.send_keys("", enter=True)
+                zellij_client.send_special_key(self.session_name, self.window_name, "Enter")
                 return
 
             # Check if Codex has fully started (welcome banner visible)
@@ -249,22 +245,22 @@ class CodexProvider(BaseProvider):
 
     def initialize(self) -> bool:
         """Initialize Codex provider by starting codex command."""
-        if not wait_for_shell(tmux_client, self.session_name, self.window_name, timeout=10.0):
+        if not wait_for_shell(zellij_client, self.session_name, self.window_name, timeout=10.0):
             raise TimeoutError("Shell initialization timed out after 10 seconds")
 
         # Send a warm-up command before launching codex.
-        # Codex exits immediately in freshly-created tmux sessions where the shell
+        # Codex exits immediately in freshly-created terminal sessions where the shell
         # has not yet processed a full interactive command cycle.
-        tmux_client.send_keys(self.session_name, self.window_name, "echo ready")
+        zellij_client.send_keys(self.session_name, self.window_name, "echo ready")
         time.sleep(2.0)
 
         # Build command with flags and agent profile (developer_instructions).
         # --no-alt-screen: run in inline mode so output stays in normal scrollback,
-        #   making tmux capture-pane reliable.
-        # --disable shell_snapshot: avoid TTY input conflicts (SIGTTIN) in tmux
+        #   keeping output available in scrollback capture.
+        # --disable shell_snapshot: avoid TTY input conflicts (SIGTTIN)
         #   caused by the shell_snapshot subprocess inheriting stdin.
         command = self._build_codex_command()
-        tmux_client.send_keys(self.session_name, self.window_name, command)
+        zellij_client.send_keys(self.session_name, self.window_name, command)
 
         # Handle workspace trust prompt if it appears (new/untrusted directories)
         self._handle_trust_prompt(timeout=20.0)
@@ -282,7 +278,7 @@ class CodexProvider(BaseProvider):
 
     def get_status(self, tail_lines: Optional[int] = None) -> TerminalStatus:
         """Get Codex status by analyzing terminal output."""
-        output = tmux_client.get_history(self.session_name, self.window_name, tail_lines=tail_lines)
+        output = zellij_client.get_history(self.session_name, self.window_name, tail_lines=tail_lines)
 
         if not output:
             return TerminalStatus.ERROR

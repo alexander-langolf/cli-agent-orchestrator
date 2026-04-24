@@ -2,7 +2,7 @@
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/awslabs/cli-agent-orchestrator)
 
-CLI Agent Orchestrator(CAO, pronounced as "kay-oh"), is a lightweight orchestration system for managing multiple AI agent sessions in tmux terminals. Enables Multi-agent collaboration via MCP server.
+CLI Agent Orchestrator(CAO, pronounced as "kay-oh"), is a lightweight orchestration system for managing multiple AI agent sessions in Zellij terminals. Enables Multi-agent collaboration via MCP server.
 
 ## Hierarchical Multi-Agent System
 
@@ -13,7 +13,7 @@ CLI Agent Orchestrator (CAO) implements a hierarchical multi-agent system that e
 ### Key Features
 
 * **Hierarchical orchestration** – CAO's supervisor agent coordinates workflow management and task delegation to specialized worker agents. The supervisor maintains overall project context while agents focus on their domains of expertise.
-* **Session-based isolation** – Each agent operates in isolated tmux sessions, ensuring proper context separation while enabling seamless communication through Model Context Protocol (MCP) servers. This provides both coordination and parallel processing capabilities.
+* **Session-based isolation** – Each agent operates in isolated Zellij sessions, ensuring proper context separation while enabling seamless communication through Model Context Protocol (MCP) servers. This provides both coordination and parallel processing capabilities.
 * **Intelligent task delegation** – CAO automatically routes tasks to appropriate specialists based on project requirements, expertise matching, and workflow dependencies. The system adapts between individual agent work and coordinated team efforts through three orchestration patterns:
     - **Handoff** - Synchronous task transfer with wait-for-completion
     - **Assign** - Asynchronous task spawning for parallel execution  
@@ -33,7 +33,7 @@ For detailed project structure and architecture, see [CODEBASE.md](CODEBASE.md).
 
 - **curl** and **git** — For downloading installers and cloning the repo
 - **Python 3.10 or higher** — CAO requires Python >=3.10 (see [pyproject.toml](pyproject.toml))
-- **tmux 3.3+** — Used for agent session isolation
+- **Zellij 0.44.1+** — Used for agent session isolation
 - **[uv](https://docs.astral.sh/uv/)** — Fast Python package installer and virtual environment manager
 
 ### 1. Install Python 3.10+
@@ -59,10 +59,19 @@ python3 --version   # Should be 3.10 or higher
 
 > **Note:** We recommend using [uv](https://docs.astral.sh/uv/) to manage Python environments instead of system-wide installations like Anaconda. `uv` automatically handles virtual environments and Python version resolution per-project.
 
-### 2. Install tmux (version 3.3 or higher required)
+### 2. Install Zellij (version 0.44.1 or higher required)
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/awslabs/cli-agent-orchestrator/refs/heads/main/tmux-install.sh)
+# macOS (Homebrew)
+brew install zellij
+
+# Ubuntu/Debian
+sudo apt update && sudo apt install zellij
+
+# Rust cargo fallback
+cargo install zellij --locked
+
+zellij --version
 ```
 
 ### 3. Install uv
@@ -169,34 +178,27 @@ cao shutdown --all
 cao shutdown --session cao-my-session
 ```
 
-### Working with tmux Sessions
+### Working with Zellij Sessions
 
-All agent sessions run in tmux. Useful commands:
+All agent sessions run in Zellij. Useful commands:
 
 ```bash
 # List all sessions
-tmux list-sessions
+zellij list-sessions
 
 # Attach to a session
-tmux attach -t <session-name>
+zellij attach <session-name>
 
-# Detach from session (inside tmux)
-Ctrl+b, then d
+# Detach from session (inside Zellij)
+Ctrl+o, then d
 
-# Switch between windows (inside tmux)
-Ctrl+b, then n          # Next window
-Ctrl+b, then p          # Previous window
-Ctrl+b, then <number>   # Go to window number (0-9)
-Ctrl+b, then w          # List all windows (interactive selector)
+# Switch between tabs (inside Zellij)
+Ctrl+o, then n          # Next tab
+Ctrl+o, then p          # Previous tab
 
 # Delete a session
 cao shutdown --session <session-name>
 ```
-
-**List all windows (Ctrl+b, w):**
-
-![Tmux Window Selector](./docs/assets/tmux_all_windows.png)
-
 
 ## Session Management
 
@@ -231,7 +233,6 @@ cao launch --agents supervisor --headless --async --yolo \
 > **Note:** Session names are automatically prefixed with `cao-`. Use the prefixed form (e.g., `cao-my-task`) when referencing sessions in commands like `cao session send` and `cao shutdown`.
 
 For full details, see the [Session Management skill](skills/cao-session-management/SKILL.md).
-
 ## Web UI
 
 CAO includes a web dashboard for managing agents, terminals, and flows from the browser.
@@ -410,8 +411,8 @@ cao flow list
 cao flow run morning-trivia
 
 # 5. View flow execution (after it runs)
-tmux list-sessions
-tmux attach -t <session-name>
+zellij list-sessions
+zellij attach <session-name>
 
 # 6. Cleanup session when done
 cao shutdown --session <session-name>

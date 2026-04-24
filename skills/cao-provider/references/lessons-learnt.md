@@ -6,7 +6,7 @@ Hard-won lessons from building and maintaining 7 CAO providers. Read this before
 
 ## 1. Stale Buffer Matching (Critical)
 
-**Problem:** Matching processing patterns (spinner characters like `✽ Cooking…`) against the full tmux history buffer. Old spinner lines persist in the buffer even after the agent finishes. Since PROCESSING is typically checked before COMPLETED in `get_status()`, the terminal gets stuck returning PROCESSING forever.
+**Problem:** Matching processing patterns (spinner characters like `✽ Cooking…`) against the full Zellij history buffer. Old spinner lines persist in the buffer even after the agent finishes. Since PROCESSING is typically checked before COMPLETED in `get_status()`, the terminal gets stuck returning PROCESSING forever.
 
 **Fix:** Either:
 - Check COMPLETED before PROCESSING — if both the idle prompt and response marker are present at the bottom of the buffer, the agent is done regardless of historical spinners
@@ -17,7 +17,7 @@ Hard-won lessons from building and maintaining 7 CAO providers. Read this before
 
 ## 2. Double Enter After Paste
 
-**Problem:** After tmux bracketed paste (`paste-buffer -p`), some TUIs enter multi-line mode. The first Enter adds a newline; the second Enter on the empty line triggers submission.
+**Problem:** After Zellij bracketed paste (`paste-buffer -p`), some TUIs enter multi-line mode. The first Enter adds a newline; the second Enter on the empty line triggers submission.
 
 **Fix:** Override the `paste_enter_count` property in your provider:
 ```python
@@ -78,9 +78,9 @@ clean_output = re.sub(ANSI_CODE_PATTERN, "", output)
 
 **Fix:** `--auto-approve` flag skips the prompt while keeping restrictions enforced. When building a new provider, ensure your e2e tests work with the existing launch flow (they go through the API, not CLI, so this shouldn't affect them — but be aware of it).
 
-## 8. tmux Session Cleanup in Tests
+## 8. Zellij Session Cleanup in Tests
 
-**Problem:** E2e tests that create multiple terminals (send_message needs 2, supervisor tests need 2-3) can leave stale tmux sessions. Subsequent tests may find terminals in `error` state.
+**Problem:** E2e tests that create multiple terminals (send_message needs 2, supervisor tests need 2-3) can leave stale Zellij sessions. Subsequent tests may find terminals in `error` state.
 
 **Fix:** Always clean up in a `finally` block. If tests are flaky with `status: error`, it's likely leftover sessions from previous test runs.
 
@@ -98,7 +98,7 @@ if "CAO_TERMINAL_ID" not in env:
 
 ## 10. Nested Session Detection
 
-**Problem:** When cao-server runs inside a Claude Code session, `CLAUDE*` env vars leak into spawned tmux panes. Claude Code detects these and refuses to start ("nested session").
+**Problem:** When cao-server runs inside a Claude Code session, `CLAUDE*` env vars leak into spawned Zellij panes. Claude Code detects these and refuses to start ("nested session").
 
 **Fix:** Unset `CLAUDE*` env vars before launching (except auth-related ones like `CLAUDE_CODE_USE_BEDROCK`):
 ```python
@@ -152,20 +152,20 @@ When writing handoff/assign logic, never flatten `["*"]` to `None` before passin
 **Fix:** After `wait_for_shell()`, send an echo round-trip with a unique marker to verify the shell is fully initialized:
 ```python
 marker = f"CAO_SHELL_READY_{self.terminal_id}"
-tmux_client.send_keys(session, window, f"echo {marker}")
+zellij_client.send_keys(session, window, f"echo {marker}")
 # Poll until marker appears in output
 ```
 This adds ~2 seconds but prevents silent launch failures.
 
 ## 15. TERM Environment Variable Compatibility
 
-**Problem:** Some CLIs (e.g., Kimi CLI v1.20.0+) silently exit when `TERM=tmux-256color` (the tmux default). No error message, just immediate exit — leaving the terminal stuck in PROCESSING forever.
+**Problem:** Some CLIs (e.g., Kimi CLI v1.20.0+) silently exit when the Zellij-provided TERM value is used. No error message, just immediate exit — leaving the terminal stuck in PROCESSING forever.
 
-**Fix:** If your CLI fails silently inside tmux, try overriding the TERM variable:
+**Fix:** If your CLI fails silently inside Zellij, try overriding the TERM variable:
 ```python
 command = f"TERM=xterm-256color {base_command}"
 ```
-Test your provider both inside and outside tmux to catch this.
+Test your provider both inside and outside Zellij to catch this.
 
 ## 16. Alt-Screen vs Scrollback — A Fundamental Design Decision
 
@@ -186,7 +186,7 @@ Test your provider both inside and outside tmux to catch this.
 def _handle_startup_prompts(self, timeout: float = 20.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        output = tmux_client.get_history(...)
+        output = zellij_client.get_history(...)
         if self._detect_trust_prompt(output):
             self._dismiss_trust_prompt()
         elif self._detect_bypass_prompt(output):

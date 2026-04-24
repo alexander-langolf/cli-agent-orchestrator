@@ -24,7 +24,7 @@ Every `cao launch` MUST include:
 
 - `--agents PROFILE` — for `kiro_cli` provider, run `kiro-cli agent list` to discover
   profiles; otherwise ask the user
-- `--headless` — required from an LLM agent; without it cao tries to attach tmux
+- `--headless` — required from an LLM agent; without it cao tries to attach Zellij
 - `--session-name NAME` — cao adds `cao-` prefix automatically
 - `--working-directory DIR` — a wrong path silently breaks the session with no
   recovery short of shutdown and relaunch. Ask the user if unclear. Always wrap

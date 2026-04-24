@@ -21,7 +21,7 @@ class TerminalStatus(str, Enum):
 
 
 class Terminal(BaseModel):
-    """Terminal model - represents a tmux window."""
+    """Terminal model - represents a Zellij tab."""
 
     model_config = ConfigDict(use_enum_values=True)
 

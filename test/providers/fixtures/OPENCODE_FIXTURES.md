@@ -2,7 +2,7 @@
 
 ## Source probe captures
 
-All fixtures were derived from tmux capture-pane output against a live
+All fixtures were derived from Zellij dump-screen output against a live
 `opencode 1.14.19` session on 2026-04-20, with one file re-captured on 2026-04-20
 after a probe-script defect was discovered (see below).
 
@@ -20,7 +20,7 @@ after a probe-script defect was discovered (see below).
 
 The original upstream probe captured `02-processing-ansi.txt` and
 `03-submitted-t12s-ansi.txt` as byte-identical files (same md5).  The PROCESSING
-ANSI fixture was re-captured via a fresh tmux probe on 2026-04-20 to produce a
+ANSI fixture was re-captured via a fresh Zellij probe on 2026-04-20 to produce a
 frame that genuinely contains `esc interrupt` in-flight.  The re-captured file has
 md5 `9cbe2723ffdab4306032226f7a21ea95`; confirmed distinct from the completed frame
 (`b73b1e19…`).
@@ -37,7 +37,7 @@ This is defensible because:
 - The ANSI variant exists only to exercise the ANSI-stripping code path; the
   COMPLETED frame is equally valid for that purpose.
 
-If a genuinely distinct ANSI idle-post-completion frame is needed, re-run the tmux
+If a genuinely distinct ANSI idle-post-completion frame is needed, re-run the Zellij
 probe, wait for idle-post-completion state, and overwrite the `.ansi.txt` file.
 
 ### `opencode_cli_permission.ansi.txt` — uses "Always allow" sub-confirmation

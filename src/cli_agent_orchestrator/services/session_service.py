@@ -1,20 +1,20 @@
 """Session service for session-level operations.
 
 This module provides session management functionality for CAO, where a "session"
-corresponds to a tmux session that may contain multiple terminal windows (agents).
+corresponds to a Zellij session that may contain multiple terminal windows (agents).
 
 Session Hierarchy:
-- Session: A tmux session (e.g., "cao-my-project")
-  - Terminal: A tmux window within the session (e.g., "developer-abc123")
+- Session: A Zellij session (e.g., "cao-my-project")
+  - Terminal: A Zellij tab within the session (e.g., "developer-abc123")
     - Provider: The CLI agent running in the terminal (e.g., KiroCliProvider)
 
 Key Operations:
 - list_sessions(): Get all CAO-managed sessions (filtered by SESSION_PREFIX)
 - get_session(): Get session details including all terminal metadata
-- delete_session(): Clean up session, providers, database records, and tmux session
+- delete_session(): Clean up session, providers, database records, and Zellij session
 
 Session Lifecycle:
-1. create_terminal() with new_session=True creates a new tmux session
+1. create_terminal() with new_session=True creates a new Zellij session
 2. Additional terminals are added via create_terminal() with new_session=False
 3. delete_session() removes the entire session and all contained terminals
 """
@@ -26,7 +26,7 @@ from cli_agent_orchestrator.clients.database import (
     delete_terminals_by_session,
     list_terminals_by_session,
 )
-from cli_agent_orchestrator.clients.tmux import tmux_client
+from cli_agent_orchestrator.clients.zellij import zellij_client
 from cli_agent_orchestrator.constants import SESSION_PREFIX
 from cli_agent_orchestrator.models.terminal import Terminal
 from cli_agent_orchestrator.plugins import (
@@ -72,10 +72,10 @@ def create_session(
 
 
 def list_sessions() -> List[Dict]:
-    """List all sessions from tmux."""
+    """List all sessions from Zellij."""
     try:
-        tmux_sessions = tmux_client.list_sessions()
-        return [s for s in tmux_sessions if s["id"].startswith(SESSION_PREFIX)]
+        session_names = zellij_client.list_sessions()
+        return [s for s in session_names if s["id"].startswith(SESSION_PREFIX)]
     except Exception as e:
         logger.error(f"Failed to list sessions: {e}")
         return []
@@ -84,11 +84,11 @@ def list_sessions() -> List[Dict]:
 def get_session(session_name: str) -> Dict:
     """Get session with terminals."""
     try:
-        if not tmux_client.session_exists(session_name):
+        if not zellij_client.session_exists(session_name):
             raise ValueError(f"Session '{session_name}' not found")
 
-        tmux_sessions = tmux_client.list_sessions()
-        session_data = next((s for s in tmux_sessions if s["id"] == session_name), None)
+        session_names = zellij_client.list_sessions()
+        session_data = next((s for s in session_names if s["id"] == session_name), None)
 
         if not session_data:
             raise ValueError(f"Session '{session_name}' not found")
@@ -109,7 +109,7 @@ def delete_session(session_name: str, registry: PluginRegistry | None = None) ->
     """
     result: Dict = {"deleted": [], "errors": []}
     try:
-        if not tmux_client.session_exists(session_name):
+        if not zellij_client.session_exists(session_name):
             raise ValueError(f"Session '{session_name}' not found")
 
         terminals = list_terminals_by_session(session_name)
@@ -121,8 +121,8 @@ def delete_session(session_name: str, registry: PluginRegistry | None = None) ->
             except Exception as e:
                 logger.warning(f"Provider cleanup failed for {terminal['id']}: {e}")
 
-        # Kill tmux session
-        tmux_client.kill_session(session_name)
+        # Kill Zellij session
+        zellij_client.kill_session(session_name)
 
         # Delete terminal metadata
         delete_terminals_by_session(session_name)

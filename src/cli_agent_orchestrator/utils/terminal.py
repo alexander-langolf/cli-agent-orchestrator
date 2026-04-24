@@ -12,7 +12,7 @@ from cli_agent_orchestrator.constants import API_BASE_URL, SESSION_PREFIX
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 
 if TYPE_CHECKING:
-    from cli_agent_orchestrator.clients.tmux import TmuxClient
+    from cli_agent_orchestrator.clients.zellij import ZellijClient
     from cli_agent_orchestrator.providers.base import BaseProvider
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ def generate_window_name(agent_profile: str) -> str:
 
 
 def wait_for_shell(
-    tmux_client: "TmuxClient",
+    zellij_client: "ZellijClient",
     session_name: str,
     window_name: str,
     timeout: float = 10.0,
@@ -47,7 +47,7 @@ def wait_for_shell(
     previous_output = None
 
     while time.time() - start_time < timeout:
-        output = tmux_client.get_history(session_name, window_name)
+        output = zellij_client.get_history(session_name, window_name)
 
         if output and output.strip() and previous_output is not None and output == previous_output:
             logger.info(f"Shell ready")

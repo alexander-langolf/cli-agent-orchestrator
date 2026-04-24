@@ -363,7 +363,6 @@ dependencies = [
     { name = "click" },
     { name = "fastapi" },
     { name = "fastmcp" },
-    { name = "libtmux" },
     { name = "mcp" },
     { name = "pydantic" },
     { name = "python-dotenv" },
@@ -394,7 +393,6 @@ requires-dist = [
     { name = "click", specifier = ">=8.0.0" },
     { name = "fastapi", specifier = ">=0.104.0" },
     { name = "fastmcp", specifier = ">=2.14.0" },
-    { name = "libtmux", specifier = ">=0.51.0" },
     { name = "mcp", specifier = ">=1.23.0" },
     { name = "pydantic", specifier = ">=2.10.6" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
@@ -1017,15 +1015,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/43/4b/674af6ef2f97d56f0ab5153bf0bfa28ccb6c3ed4d1babf4305449668807b/keyring-25.7.0.tar.gz", hash = "sha256:fe01bd85eb3f8fb3dd0405defdeac9a5b4f6f0439edbb3149577f244a2e8245b", size = 63516, upload-time = "2025-11-16T16:26:09.482Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/81/db/e655086b7f3a705df045bf0933bdd9c2f79bb3c97bfef1384598bb79a217/keyring-25.7.0-py3-none-any.whl", hash = "sha256:be4a0b195f149690c166e850609a477c532ddbfbaed96a404d4e43f8d5e2689f", size = 39160, upload-time = "2025-11-16T16:26:08.402Z" },
-]
-
-[[package]]
-name = "libtmux"
-version = "0.51.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/fc/fd/dfc5fff48128a4790fd69a55d10024f4a322e4a6ef4564c221dfa71df4cf/libtmux-0.51.0.tar.gz", hash = "sha256:4f75bb8692163374adbdba451a4959834b542c2b749892d9139624d478fc1771", size = 398729, upload-time = "2025-12-06T21:13:41.664Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/27/3a/1617ccfcab2df8cbf0bc0146b590430589c6c0869dee8767f32dac520d2c/libtmux-0.51.0-py3-none-any.whl", hash = "sha256:840e7e1805f065413f1ca77a4477570b70630d0845d95beb5d22bcd2d656a608", size = 77084, upload-time = "2025-12-06T21:13:40.726Z" },
 ]
 
 [[package]]

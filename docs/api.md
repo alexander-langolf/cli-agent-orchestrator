@@ -182,7 +182,7 @@ Send provider-specific exit command to terminal.
 **Behavior:**
 - Calls the provider's `exit_cli()` method to get the exit command
 - Text commands (e.g., `/exit`, `quit`) are sent as literal text via `send_input()`
-- Key sequences prefixed with `C-` or `M-` (e.g., `C-d` for Ctrl+D) are sent as tmux key sequences via `send_special_key()`, which tmux interprets as actual key presses
+- Key sequences prefixed with `C-` or `M-` (e.g., `C-d` for Ctrl+D) are sent as Zellij key sequences via `send_special_key()`, which Zellij interprets as actual key presses
 
 | Provider | Exit Command | Type |
 |----------|-------------|------|

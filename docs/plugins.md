@@ -16,7 +16,7 @@ For ready-to-try reference plugins, see [`examples/plugins/`](../examples/plugin
 
 This walkthrough takes you from a fresh clone to seeing plugin events fire end-to-end. It uses the bundled Discord example plugin, but the steps apply to any plugin.
 
-1. **Install CAO and its prerequisites** — follow [README.md § Installation](../README.md#installation) (uv, tmux 3.3+, Python 3.10+, then `uv sync` for a dev checkout).
+1. **Install CAO and its prerequisites** — follow [README.md § Installation](../README.md#installation) (uv, Zellij >=0.44.1, Python 3.10+, then `uv sync` for a dev checkout).
 2. **Install the Discord plugin** into the same environment:
    ```bash
    uv pip install -e examples/plugins/cao-discord

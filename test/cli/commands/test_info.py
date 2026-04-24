@@ -10,23 +10,20 @@ from cli_agent_orchestrator.cli.commands.info import info
 class TestInfoCommand:
     """Test cao info command."""
 
-    def test_info_not_in_tmux(self):
-        """Test output when not running inside tmux."""
+    def test_info_not_in_Zellij(self):
+        """Test output when not running inside Zellij."""
         runner = CliRunner()
-        with patch("subprocess.run", side_effect=FileNotFoundError):
+        with patch.dict("os.environ", {}, clear=True):
             result = runner.invoke(info)
 
         assert result.exit_code == 0
         assert "Database path:" in result.output
         assert "Not currently in a CAO session." in result.output
 
-    def test_info_in_tmux_non_cao_session(self):
-        """Test output when in tmux but not a CAO session."""
+    def test_info_in_Zellij_non_cao_session(self):
+        """Test output when in Zellij but not a CAO session."""
         runner = CliRunner()
-        mock_result = MagicMock()
-        mock_result.stdout = "my-random-session\n"
-
-        with patch("subprocess.run", return_value=mock_result):
+        with patch.dict("os.environ", {"ZELLIJ_SESSION_NAME": "my-random-session"}):
             result = runner.invoke(info)
 
         assert result.exit_code == 0
@@ -36,14 +33,11 @@ class TestInfoCommand:
     def test_info_in_cao_session_server_responds(self):
         """Test output when in a CAO session and server is reachable."""
         runner = CliRunner()
-        mock_subprocess = MagicMock()
-        mock_subprocess.stdout = "cao-test-session\n"
-
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {"terminals": [{"id": "abc"}, {"id": "def"}]}
 
-        with patch("subprocess.run", return_value=mock_subprocess):
+        with patch.dict("os.environ", {"ZELLIJ_SESSION_NAME": "cao-test-session"}):
             with patch("requests.get", return_value=mock_response):
                 result = runner.invoke(info)
 
@@ -55,13 +49,10 @@ class TestInfoCommand:
     def test_info_in_cao_session_server_404(self):
         """Test output when in a CAO session but server returns 404."""
         runner = CliRunner()
-        mock_subprocess = MagicMock()
-        mock_subprocess.stdout = "cao-test-session\n"
-
         mock_response = MagicMock()
         mock_response.status_code = 404
 
-        with patch("subprocess.run", return_value=mock_subprocess):
+        with patch.dict("os.environ", {"ZELLIJ_SESSION_NAME": "cao-test-session"}):
             with patch("requests.get", return_value=mock_response):
                 result = runner.invoke(info)
 
@@ -73,10 +64,7 @@ class TestInfoCommand:
         import requests as req
 
         runner = CliRunner()
-        mock_subprocess = MagicMock()
-        mock_subprocess.stdout = "cao-test-session\n"
-
-        with patch("subprocess.run", return_value=mock_subprocess):
+        with patch.dict("os.environ", {"ZELLIJ_SESSION_NAME": "cao-test-session"}):
             with patch(
                 "requests.get",
                 side_effect=req.exceptions.ConnectionError("Connection refused"),

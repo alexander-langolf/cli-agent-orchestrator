@@ -4,7 +4,7 @@ This module defines all configuration constants used throughout the CAO applicat
 including directory paths, server settings, and provider configurations.
 
 The CAO application orchestrates multiple CLI-based AI agents (Kiro CLI, Claude Code,
-Codex, Kimi CLI, Q CLI) through tmux sessions, providing a unified interface
+Codex, Kimi CLI, Q CLI) through Zellij sessions, providing a unified interface
 for agent management.
 """
 
@@ -16,7 +16,7 @@ from cli_agent_orchestrator.models.provider import ProviderType
 # =============================================================================
 # Session Configuration
 # =============================================================================
-# All CAO-managed tmux sessions are prefixed to distinguish them from user sessions
+# All CAO-managed Zellij sessions are prefixed to distinguish them from user sessions
 SESSION_PREFIX = "cao-"
 
 # =============================================================================
@@ -30,11 +30,11 @@ PROVIDERS = [p.value for p in ProviderType]
 DEFAULT_PROVIDER = ProviderType.KIRO_CLI.value
 
 # =============================================================================
-# Tmux Configuration
+# Terminal Runtime Configuration
 # =============================================================================
 # Maximum lines of terminal history to capture when analyzing output
 # Higher values provide more context but increase memory usage
-TMUX_HISTORY_LINES = 200
+TERMINAL_HISTORY_LINES = 200
 
 # =============================================================================
 # Application Directory Structure
@@ -50,7 +50,7 @@ DB_DIR = CAO_HOME_DIR / "db"
 
 # Log file directory structure
 LOG_DIR = CAO_HOME_DIR / "logs"
-TERMINAL_LOG_DIR = LOG_DIR / "terminal"  # Per-terminal log files for pipe-pane output
+TERMINAL_LOG_DIR = LOG_DIR / "terminal"  # Per-terminal log files for Zellij subscribe output
 TERMINAL_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # =============================================================================

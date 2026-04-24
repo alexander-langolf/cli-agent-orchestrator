@@ -22,8 +22,11 @@ class TerminalModel(Base):
     __tablename__ = "terminals"
 
     id = Column(String, primary_key=True)  # "abc123ef"
-    tmux_session = Column(String, nullable=False)  # "cao-session-name"
-    tmux_window = Column(String, nullable=False)  # "window-name"
+    session_name = Column(String, nullable=True)  # "cao-session-name"
+    terminal_name = Column(String, nullable=True)  # "developer-abc1"
+    zellij_tab_id = Column(Integer, nullable=True)
+    zellij_pane_id = Column(Integer, nullable=True)
+    launch_working_directory = Column(String, nullable=True)
     provider = Column(String, nullable=False)  # "q_cli", "claude_code"
     agent_profile = Column(String)  # "developer", "reviewer" (optional)
     allowed_tools = Column(String, nullable=True)  # JSON-encoded list of CAO tool names
@@ -69,6 +72,7 @@ def init_db() -> None:
     """Initialize database tables and apply schema migrations."""
     Base.metadata.create_all(bind=engine)
     _migrate_add_allowed_tools()
+    _migrate_terminal_runtime_columns()
 
 
 def _migrate_add_allowed_tools() -> None:
@@ -90,13 +94,148 @@ def _migrate_add_allowed_tools() -> None:
         logger.warning(f"Migration check for allowed_tools failed: {e}")
 
 
+def _migrate_terminal_runtime_columns() -> None:
+    """Add neutral/Zellij terminal runtime columns and backfill from old tmux columns."""
+    import sqlite3
+
+    from cli_agent_orchestrator.constants import DATABASE_FILE
+
+    try:
+        with sqlite3.connect(str(DATABASE_FILE)) as conn:
+            cursor = conn.execute("PRAGMA table_info(terminals)")
+            table_info = cursor.fetchall()
+            columns = {row[1] for row in table_info}
+            migrations = {
+                "session_name": "ALTER TABLE terminals ADD COLUMN session_name TEXT",
+                "terminal_name": "ALTER TABLE terminals ADD COLUMN terminal_name TEXT",
+                "zellij_tab_id": "ALTER TABLE terminals ADD COLUMN zellij_tab_id INTEGER",
+                "zellij_pane_id": "ALTER TABLE terminals ADD COLUMN zellij_pane_id INTEGER",
+                "launch_working_directory": (
+                    "ALTER TABLE terminals ADD COLUMN launch_working_directory TEXT"
+                ),
+            }
+            for column, statement in migrations.items():
+                if column not in columns:
+                    conn.execute(statement)
+                    logger.info("Migration: added %s column to terminals table", column)
+
+            if "tmux_session" in columns:
+                conn.execute(
+                    "UPDATE terminals SET session_name = tmux_session "
+                    "WHERE session_name IS NULL"
+                )
+            if "tmux_window" in columns:
+                conn.execute(
+                    "UPDATE terminals SET terminal_name = tmux_window "
+                    "WHERE terminal_name IS NULL"
+                )
+            _rebuild_terminals_table_if_legacy_not_null(conn)
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"Migration check for terminal runtime columns failed: {e}")
+
+
+def _rebuild_terminals_table_if_legacy_not_null(conn: Any) -> None:
+    """Relax old tmux column NOT NULL constraints left by pre-Zellij databases."""
+    table_info = conn.execute("PRAGMA table_info(terminals)").fetchall()
+    columns = {row[1] for row in table_info}
+    legacy_not_null = any(
+        row[1] in {"tmux_session", "tmux_window"} and row[3] == 1 for row in table_info
+    )
+    if not legacy_not_null:
+        return
+
+    include_tmux_session = "tmux_session" in columns
+    include_tmux_window = "tmux_window" in columns
+    legacy_columns_sql = []
+    if include_tmux_session:
+        legacy_columns_sql.append("tmux_session TEXT")
+    if include_tmux_window:
+        legacy_columns_sql.append("tmux_window TEXT")
+
+    conn.execute("ALTER TABLE terminals RENAME TO terminals_legacy_runtime_migration")
+    conn.execute(
+        f"""
+        CREATE TABLE terminals (
+            id TEXT PRIMARY KEY,
+            session_name TEXT,
+            terminal_name TEXT,
+            zellij_tab_id INTEGER,
+            zellij_pane_id INTEGER,
+            launch_working_directory TEXT,
+            provider TEXT NOT NULL,
+            agent_profile TEXT,
+            allowed_tools TEXT,
+            last_active DATETIME
+            {"," if legacy_columns_sql else ""}
+            {", ".join(legacy_columns_sql)}
+        )
+        """
+    )
+
+    def value_for(column: str, fallback: str = "NULL") -> str:
+        return column if column in columns else fallback
+
+    session_value = value_for("session_name", value_for("tmux_session"))
+    if "session_name" in columns and "tmux_session" in columns:
+        session_value = "COALESCE(session_name, tmux_session)"
+
+    terminal_value = value_for("terminal_name", value_for("tmux_window"))
+    if "terminal_name" in columns and "tmux_window" in columns:
+        terminal_value = "COALESCE(terminal_name, tmux_window)"
+
+    insert_columns = [
+        "id",
+        "session_name",
+        "terminal_name",
+        "zellij_tab_id",
+        "zellij_pane_id",
+        "launch_working_directory",
+        "provider",
+        "agent_profile",
+        "allowed_tools",
+        "last_active",
+    ]
+    select_values = [
+        "id",
+        session_value,
+        terminal_value,
+        value_for("zellij_tab_id"),
+        value_for("zellij_pane_id"),
+        value_for("launch_working_directory"),
+        "provider",
+        value_for("agent_profile"),
+        value_for("allowed_tools"),
+        value_for("last_active", "CURRENT_TIMESTAMP"),
+    ]
+    if include_tmux_session:
+        insert_columns.append("tmux_session")
+        select_values.append("tmux_session")
+    if include_tmux_window:
+        insert_columns.append("tmux_window")
+        select_values.append("tmux_window")
+
+    conn.execute(
+        f"""
+        INSERT INTO terminals ({", ".join(insert_columns)})
+        SELECT {", ".join(select_values)}
+        FROM terminals_legacy_runtime_migration
+        """
+    )
+    conn.execute("DROP TABLE terminals_legacy_runtime_migration")
+    logger.info("Migration: relaxed legacy tmux NOT NULL constraints on terminals table")
+
+
 def create_terminal(
     terminal_id: str,
-    tmux_session: str,
-    tmux_window: str,
+    session_name: str,
+    terminal_name: str,
     provider: str,
     agent_profile: Optional[str] = None,
     allowed_tools: Optional[List[str]] = None,
+    zellij_tab_id: Optional[int] = None,
+    zellij_pane_id: Optional[int] = None,
+    launch_working_directory: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create terminal metadata record."""
     import json as _json
@@ -104,8 +243,11 @@ def create_terminal(
     with SessionLocal() as db:
         terminal = TerminalModel(
             id=terminal_id,
-            tmux_session=tmux_session,
-            tmux_window=tmux_window,
+            session_name=session_name,
+            terminal_name=terminal_name,
+            zellij_tab_id=zellij_tab_id,
+            zellij_pane_id=zellij_pane_id,
+            launch_working_directory=launch_working_directory,
             provider=provider,
             agent_profile=agent_profile,
             allowed_tools=_json.dumps(allowed_tools) if allowed_tools else None,
@@ -114,8 +256,11 @@ def create_terminal(
         db.commit()
         return {
             "id": terminal.id,
-            "tmux_session": terminal.tmux_session,
-            "tmux_window": terminal.tmux_window,
+            "session_name": terminal.session_name,
+            "name": terminal.terminal_name,
+            "zellij_tab_id": terminal.zellij_tab_id,
+            "zellij_pane_id": terminal.zellij_pane_id,
+            "launch_working_directory": terminal.launch_working_directory,
             "provider": terminal.provider,
             "agent_profile": terminal.agent_profile,
             "allowed_tools": allowed_tools,
@@ -132,13 +277,17 @@ def get_terminal_metadata(terminal_id: str) -> Optional[Dict[str, Any]]:
             logger.warning(f"Terminal metadata not found for terminal_id: {terminal_id}")
             return None
         logger.debug(
-            f"Retrieved terminal metadata for {terminal_id}: provider={terminal.provider}, session={terminal.tmux_session}"
+            f"Retrieved terminal metadata for {terminal_id}: provider={terminal.provider}, session={terminal.session_name}"
         )
         allowed_tools = _json.loads(terminal.allowed_tools) if terminal.allowed_tools else None
         return {
             "id": terminal.id,
-            "tmux_session": terminal.tmux_session,
-            "tmux_window": terminal.tmux_window,
+            "session_name": terminal.session_name,
+            "terminal_name": terminal.terminal_name,
+            "name": terminal.terminal_name,
+            "zellij_tab_id": terminal.zellij_tab_id,
+            "zellij_pane_id": terminal.zellij_pane_id,
+            "launch_working_directory": terminal.launch_working_directory,
             "provider": terminal.provider,
             "agent_profile": terminal.agent_profile,
             "allowed_tools": allowed_tools,
@@ -146,15 +295,18 @@ def get_terminal_metadata(terminal_id: str) -> Optional[Dict[str, Any]]:
         }
 
 
-def list_terminals_by_session(tmux_session: str) -> List[Dict[str, Any]]:
-    """List all terminals in a tmux session."""
+def list_terminals_by_session(session_name: str) -> List[Dict[str, Any]]:
+    """List all terminals in a session."""
     with SessionLocal() as db:
-        terminals = db.query(TerminalModel).filter(TerminalModel.tmux_session == tmux_session).all()
+        terminals = db.query(TerminalModel).filter(TerminalModel.session_name == session_name).all()
         return [
             {
                 "id": t.id,
-                "tmux_session": t.tmux_session,
-                "tmux_window": t.tmux_window,
+                "session_name": t.session_name,
+                "name": t.terminal_name,
+                "zellij_tab_id": t.zellij_tab_id,
+                "zellij_pane_id": t.zellij_pane_id,
+                "launch_working_directory": t.launch_working_directory,
                 "provider": t.provider,
                 "agent_profile": t.agent_profile,
                 "last_active": t.last_active,
@@ -181,8 +333,11 @@ def list_all_terminals() -> List[Dict[str, Any]]:
         return [
             {
                 "id": t.id,
-                "tmux_session": t.tmux_session,
-                "tmux_window": t.tmux_window,
+                "session_name": t.session_name,
+                "name": t.terminal_name,
+                "zellij_tab_id": t.zellij_tab_id,
+                "zellij_pane_id": t.zellij_pane_id,
+                "launch_working_directory": t.launch_working_directory,
                 "provider": t.provider,
                 "agent_profile": t.agent_profile,
                 "last_active": t.last_active,
@@ -199,11 +354,11 @@ def delete_terminal(terminal_id: str) -> bool:
         return deleted > 0
 
 
-def delete_terminals_by_session(tmux_session: str) -> int:
+def delete_terminals_by_session(session_name: str) -> int:
     """Delete all terminals in a session."""
     with SessionLocal() as db:
         deleted = (
-            db.query(TerminalModel).filter(TerminalModel.tmux_session == tmux_session).delete()
+            db.query(TerminalModel).filter(TerminalModel.session_name == session_name).delete()
         )
         db.commit()
         return deleted
