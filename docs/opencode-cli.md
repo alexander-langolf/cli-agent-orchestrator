@@ -1,6 +1,6 @@
 # OpenCode CLI Provider
 
-> ⚠️ **Experimental — single-agent flows only.** Multi-agent orchestration (assign / send_message back to a supervisor) is **not yet reliable** on `opencode_cli`: the supervisor's inbox can deadlock with `pending` messages after its turn settles. Single-agent and pure handoff workflows are unaffected. Tracking: [#203](https://github.com/awslabs/cli-agent-orchestrator/issues/203).
+> ⚠️ **Experimental.** Multi-agent orchestration (`assign` / `send_message` back to a supervisor) now uses a temporary OpenCode-specific inbox polling fallback for [#203](https://github.com/awslabs/cli-agent-orchestrator/issues/203). This prevents pending supervisor inbox messages from getting stuck after the OpenCode TUI settles, but delivery is still not fully unified with the immediate and watchdog paths until [#115](https://github.com/awslabs/cli-agent-orchestrator/pull/115) replaces them with a single coordinator.
 
 ## Overview
 
@@ -57,8 +57,10 @@ cao launch --agents developer --provider opencode_cli --auto-approve
 # Specify model override
 cao launch --agents developer --provider opencode_cli --model anthropic/claude-sonnet-4-6
 
-# Unrestricted (DANGEROUS) — agent can run any command
-cao launch --agents developer --provider opencode_cli --yolo
+# Unrestricted access — install the profile with allowedTools: ["*"] first.
+# `cao launch --yolo` is a no-op on opencode_cli (see Known Limitations).
+cao install developer --provider opencode_cli   # profile must have allowedTools: ["*"]
+cao launch --agents developer --provider opencode_cli
 ```
 
 Via HTTP API:
@@ -114,7 +116,7 @@ Tools not in any enabled category default to `deny`. The following tools have ha
 | `webfetch`, `websearch`, `codesearch` | deny | Network egress — opt-in only |
 | `todowrite`, `skill` | allow | In-memory / additive, no side-effects |
 
-Pass `--yolo` (or set `allowedTools: ["*"]` in the profile) to allow all 13 tools including the above.
+To allow all 13 tools including the above, set `allowedTools: ["*"]` in the profile and re-run `cao install`. Unlike the other providers, `cao launch --yolo` does **not** widen permissions at runtime on `opencode_cli` — see [`cao launch --yolo` is install-time only](#cao-launch---yolo-is-install-time-only) below.
 
 ### `cao launch --auto-approve`
 
@@ -187,6 +189,27 @@ The `test_assign_with_callback` test validates all four orchestration modes:
 - **handoff** (blocking): inbox delivery triggers supervisor state transition
 
 ## Known Limitations
+
+### `cao launch --yolo` is install-time only
+
+Unlike every other CAO provider, `opencode_cli` does **not** honour `cao launch --yolo` at runtime. Permissions are baked into the installed agent's frontmatter `permission:` block at `cao install` time and cannot be loosened by a launch flag.
+
+Root cause: OpenCode's TUI (the mode CAO drives) has no equivalent to `--dangerously-skip-permissions` / `--yolo` / `--trust-all-tools`. The flag exists only on the `opencode run` headless one-shot command, which CAO does not use. Tracked upstream in [sst/opencode#8463](https://github.com/sst/opencode/issues/8463) and sibling issues.
+
+**To get unrestricted access on `opencode_cli`:**
+
+```bash
+# 1. Edit the profile's frontmatter so it contains:
+#    allowedTools: ["*"]
+
+# 2. Re-run cao install — this rewrites the permission: block with all tools set to allow.
+cao install my_agent --provider opencode_cli
+
+# 3. Launch normally (omit --yolo — it would emit a warning and still only honour what's installed).
+cao launch --agents my_agent --provider opencode_cli
+```
+
+Runtime permission bypass support remains unavailable for OpenCode's TUI mode. CAO can revisit this either with a temp-agent workaround or by consuming an upstream TUI flag once one ships.
 
 ### Project-local `opencode.json` override
 
