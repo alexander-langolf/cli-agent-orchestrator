@@ -14,13 +14,22 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Dict, List, Optional, cast
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    BackgroundTasks,
+    Body,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field, field_validator
 from watchdog.observers.polling import PollingObserver
 
-from cli_agent_orchestrator.clients.zellij import zellij_client
 from cli_agent_orchestrator.clients.database import (
     create_inbox_message,
     get_inbox_messages,
@@ -31,11 +40,14 @@ from cli_agent_orchestrator.constants import (
     ALLOWED_HOSTS,
     CAO_HOME_DIR,
     CORS_ORIGINS,
+    DEFAULT_PROVIDER,
     INBOX_POLLING_INTERVAL,
     SERVER_HOST,
     SERVER_PORT,
     SERVER_VERSION,
     TERMINAL_LOG_DIR,
+    WS_ALLOWED_CLIENTS,
+    add_local_cors_origins,
 )
 from cli_agent_orchestrator.models.flow import Flow
 from cli_agent_orchestrator.models.inbox import MessageStatus, OrchestrationType
@@ -48,17 +60,21 @@ from cli_agent_orchestrator.services import (
     session_service,
     terminal_service,
 )
-from cli_agent_orchestrator.services.cleanup_service import cleanup_old_data
+from cli_agent_orchestrator.services.cleanup_service import (
+    cleanup_expired_memories,
+    cleanup_old_data,
+)
 from cli_agent_orchestrator.services.inbox_service import LogFileHandler
+from cli_agent_orchestrator.services.install_service import InstallResult, install_agent
 from cli_agent_orchestrator.services.terminal_service import OutputMode
-from cli_agent_orchestrator.utils.agent_profiles import resolve_provider
+from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile, resolve_provider
 from cli_agent_orchestrator.utils.logging import setup_logging
 from cli_agent_orchestrator.utils.skills import (
     SkillNameError,
     load_skill_content,
     validate_skill_name,
 )
-from cli_agent_orchestrator.utils.terminal import generate_session_name
+from cli_agent_orchestrator.utils.terminal import generate_session_name, validate_tmux_name
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +132,18 @@ class WorkingDirectoryResponse(BaseModel):
     )
 
 
+class InstallAgentProfileRequest(BaseModel):
+    """Request body for installing an agent profile.
+
+    ``env_vars`` travels in the JSON body rather than as a query parameter so
+    that any secrets callers inject are not written to HTTP access logs.
+    """
+
+    source: str
+    provider: str = DEFAULT_PROVIDER
+    env_vars: Optional[Dict[str, str]] = None
+
+
 class CreateFlowRequest(BaseModel):
     """Request model for creating a flow."""
 
@@ -146,6 +174,7 @@ async def lifespan(app: FastAPI):
 
     # Run cleanup in background
     asyncio.create_task(asyncio.to_thread(cleanup_old_data))
+    asyncio.create_task(cleanup_expired_memories())
 
     # Start flow daemon as background task
     daemon_task = asyncio.create_task(flow_daemon())
@@ -191,6 +220,29 @@ def get_plugin_registry(request: Request) -> PluginRegistry:
     return cast(PluginRegistry, request.app.state.plugin_registry)
 
 
+# Values that indicate ``TERM`` is effectively unusable and must be overridden
+# rather than inherited by the tmux attach subprocess. ``dumb`` is the common
+# fallback that containers and devcontainers ship with when no real terminal
+# is attached. Empty string and missing key behave the same way.
+_UNUSABLE_TERM_VALUES = frozenset({"", "dumb"})
+_DEFAULT_PTY_TERM = "xterm-256color"
+
+
+def _build_pty_env() -> Dict[str, str]:
+    """Build the env handed to the tmux PTY attach subprocess.
+
+    Copies the parent process environment so cao-server's normal config
+    (PATH, HOME, AWS_*, etc.) reaches tmux, and forces ``TERM`` to a usable
+    value when the inherited one would break terminal rendering. Explicit
+    non-dumb ``TERM`` values from the operator are preserved verbatim. See
+    issue #150.
+    """
+    env = os.environ.copy()
+    if env.get("TERM", "") in _UNUSABLE_TERM_VALUES:
+        env["TERM"] = _DEFAULT_PTY_TERM
+    return env
+
+
 app = FastAPI(
     title="CLI Agent Orchestrator",
     description="Simplified CLI Agent Orchestrator API",
@@ -232,6 +284,41 @@ async def list_agent_profiles_endpoint() -> List[Dict]:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to list agent profiles: {str(e)}",
         )
+
+
+@app.get("/agents/profiles/{name}")
+async def get_agent_profile_endpoint(name: str) -> Dict:
+    """Return the full parsed content of a named agent profile."""
+    try:
+        profile = load_agent_profile(name)
+        return profile.model_dump(exclude_none=True)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@app.post("/agents/profiles/install")
+async def install_agent_profile_endpoint(request: InstallAgentProfileRequest) -> InstallResult:
+    """Install an agent profile for a target provider.
+
+    HTTP (and transitively ``cao-ops-mcp``, which calls this endpoint) is an
+    untrusted surface. ``install_agent()`` only accepts bare profile names or
+    https:// URLs; local filesystem paths are handled by the CLI entry point
+    alone. A remote caller therefore cannot coerce the server into reading
+    arbitrary ``.md`` files from disk.
+    """
+    result = install_agent(
+        source=request.source,
+        provider=request.provider,
+        env_vars=request.env_vars,
+    )
+    if not result.success:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.message)
+
+    return result
 
 
 @app.get("/agents/providers")
@@ -325,14 +412,44 @@ async def get_skill_content(name: str) -> SkillContentResponse:
 @app.post("/sessions", response_model=Terminal, status_code=status.HTTP_201_CREATED)
 async def create_session(
     request: Request,
+    background_tasks: BackgroundTasks,
     agent_profile: str,
     provider: Optional[str] = None,
     session_name: Optional[str] = None,
     working_directory: Optional[str] = None,
     allowed_tools: Optional[str] = None,
+    memory_manager: Optional[str] = None,
+    env_vars: Optional[Dict[str, str]] = Body(default=None, embed=True),
 ) -> Terminal:
-    """Create a new session with exactly one terminal."""
+    """Create a new session with exactly one terminal.
+
+    When ``memory_manager`` is truthy, a sidecar ``memory_manager`` terminal is
+    spawned asynchronously in the same tmux session — provider initialization
+    can take 15-30s and would otherwise block the HTTP response past the
+    client's request timeout. The worker's first message may arrive before
+    the curator reaches IDLE; ``get_curated_memory_context`` falls back to
+    Phase 1 in that window.
+
+    ``env_vars`` (request body, optional) is the operator-forwarded env map
+    from ``cao launch --env``. It travels in the JSON body — not the query
+    string — so values potentially containing secrets do not land in
+    cao-server's HTTP access log. See issue #248.
+    """
     try:
+        if session_name is not None:
+            # terminal_service.create_terminal prepends SESSION_PREFIX
+            # ("cao-") if missing, so an API caller's 64-char valid name
+            # would become 68 chars and fail downstream validation. Check
+            # the *effective* prefixed value here so the rejection happens
+            # at the boundary with a clear message.
+            from cli_agent_orchestrator.constants import SESSION_PREFIX
+
+            effective = (
+                session_name
+                if session_name.startswith(SESSION_PREFIX)
+                else f"{SESSION_PREFIX}{session_name}"
+            )
+            validate_tmux_name(effective, "session_name")
         # Parse comma-separated allowed_tools string into list
         allowed_tools_list = allowed_tools.split(",") if allowed_tools else None
 
@@ -343,7 +460,30 @@ async def create_session(
             working_directory=working_directory,
             allowed_tools=allowed_tools_list,
             registry=get_plugin_registry(request),
+            env_vars=env_vars,
         )
+
+        if memory_manager and str(memory_manager).lower() in ("true", "1", "yes"):
+            registry = get_plugin_registry(request)
+            sidecar_provider = provider or DEFAULT_PROVIDER
+            sidecar_session = result.session_name
+
+            def _spawn_sidecar() -> None:
+                try:
+                    from cli_agent_orchestrator.services import terminal_service
+
+                    terminal_service.create_terminal(
+                        provider=sidecar_provider,
+                        agent_profile="memory_manager",
+                        session_name=sidecar_session,
+                        working_directory=working_directory,
+                        registry=registry,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to spawn memory_manager sidecar: {e}")
+
+            background_tasks.add_task(_spawn_sidecar)
+
         return result
 
     except ValueError as e:
@@ -368,6 +508,12 @@ async def list_sessions() -> List[Dict]:
 
 @app.get("/sessions/{session_name}")
 async def get_session(session_name: str) -> Dict:
+    # Validate before entering the try block so a malformed name surfaces
+    # as 400 instead of being mapped to 404 by the not-found handler below.
+    try:
+        validate_tmux_name(session_name, "session_name")
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     try:
         return session_service.get_session(session_name)
     except ValueError as e:
@@ -381,6 +527,10 @@ async def get_session(session_name: str) -> Dict:
 
 @app.delete("/sessions/{session_name}")
 async def delete_session(request: Request, session_name: str) -> Dict:
+    try:
+        validate_tmux_name(session_name, "session_name")
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     try:
         result = session_service.delete_session(session_name, registry=get_plugin_registry(request))
         return {"success": True, **result}
@@ -407,6 +557,10 @@ async def create_terminal_in_session(
     allowed_tools: Optional[str] = None,
 ) -> Terminal:
     """Create additional terminal in existing session."""
+    try:
+        validate_tmux_name(session_name, "session_name")
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     try:
         if provider is None:
             resolved_provider = resolve_provider(agent_profile, fallback_provider="kiro_cli")
@@ -439,6 +593,10 @@ async def create_terminal_in_session(
 async def list_terminals_in_session(session_name: str) -> List[Dict]:
     """List all terminals in a session."""
     try:
+        validate_tmux_name(session_name, "session_name")
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    try:
         from cli_agent_orchestrator.clients.database import list_terminals_by_session
 
         return list_terminals_by_session(session_name)
@@ -460,6 +618,30 @@ async def get_terminal(terminal_id: TerminalId) -> Terminal:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get terminal: {str(e)}",
+        )
+
+
+@app.get("/terminals/{terminal_id}/memory-context")
+async def get_terminal_memory_context(terminal_id: TerminalId):
+    """Return the CAO memory context block for a terminal as plain text.
+
+    Used by the Kiro AgentSpawn hook to inject memory into agent context.
+    Returns empty 200 if no memories exist for this terminal.
+    """
+    from fastapi.responses import PlainTextResponse
+
+    try:
+        from cli_agent_orchestrator.services.memory_service import MemoryService
+
+        svc = MemoryService()
+        context = svc.get_memory_context_for_terminal(terminal_id)
+        return PlainTextResponse(content=context)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get memory context: {str(e)}",
         )
 
 
@@ -528,9 +710,9 @@ async def exit_terminal(terminal_id: TerminalId) -> Dict:
         if provider is None:
             raise ValueError(f"Provider not found for terminal {terminal_id}")
         exit_command = provider.exit_cli()
-        # Some providers use key sequences (e.g., "C-d" for Ctrl+D) instead
+        # Some providers use tmux key sequences (e.g., "C-d" for Ctrl+D) instead
         # of text commands (e.g., "/exit"). Key sequences must be sent via
-        # send_special_key() to be interpreted by the terminal runtime, not as literal text.
+        # send_special_key() to be interpreted by tmux, not as literal text.
         if exit_command.startswith(("C-", "M-")):
             terminal_service.send_special_key(terminal_id, exit_command)
         else:
@@ -667,16 +849,19 @@ async def get_inbox_messages_endpoint(
 
 @app.websocket("/terminals/{terminal_id}/ws")
 async def terminal_ws(websocket: WebSocket, terminal_id: str):
-    """WebSocket endpoint for live terminal streaming via Zellij attach.
+    """WebSocket endpoint for live terminal streaming via tmux attach.
 
     Security: This endpoint provides full PTY access with no authentication.
     It is intended for localhost-only use. Do NOT expose the server to
     untrusted networks (e.g. --host 0.0.0.0) without adding authentication.
     """
-    # Reject connections from non-loopback clients
+    # Reject connections from clients outside the configured allowlist.
+    # Defaults to loopback; operators running cao-server inside a container can
+    # extend the allowlist with the ``CAO_WS_ALLOWED_CLIENTS`` env var so the
+    # host browser (reaching the container via a bridge IP) can attach.
     client_host = websocket.client.host if websocket.client else None
-    if client_host not in (None, "127.0.0.1", "::1", "localhost"):
-        await websocket.close(code=4003, reason="WebSocket access is restricted to localhost")
+    if client_host is not None and client_host not in WS_ALLOWED_CLIENTS:
+        await websocket.close(code=4003, reason="WebSocket access is restricted to allowed clients")
         return
 
     await websocket.accept()
@@ -686,25 +871,41 @@ async def terminal_ws(websocket: WebSocket, terminal_id: str):
         await websocket.close(code=4004, reason="Terminal not found")
         return
 
-    session_name = metadata["session_name"]
-    zellij_client.focus_tab(session_name, metadata["zellij_tab_id"])
+    # Defence-in-depth: re-validate the names from the DB before they
+    # flow into a tmux subprocess argument. The POST /sessions handler
+    # now validates user-supplied session_name, but pre-existing rows
+    # or future code paths could still bypass that, and tmux parses
+    # ':' / '.' as target delimiters. Bind the validator return values
+    # so the sanitization is explicit at the actual sink below.
+    try:
+        session_name = validate_tmux_name(metadata["tmux_session"], "session_name")
+        window_name = validate_tmux_name(metadata["tmux_window"], "window_name")
+    except ValueError:
+        await websocket.close(code=4003, reason="Invalid tmux target name")
+        return
 
-    # Create PTY pair for Zellij attach
+    # Create PTY pair for tmux attach
     master_fd, slave_fd = pty.openpty()
 
     # Set initial terminal size
     winsize = struct.pack("HHHH", 24, 80, 0, 0)
     fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, winsize)
 
-    # Start Zellij attach inside the PTY
+    # Start tmux attach inside the PTY.
+    # Container/devcontainer environments often leave TERM unset or set to
+    # ``dumb``, which strips colours, breaks cursor positioning and corrupts
+    # the Ink-based TUIs that agent CLIs render. Force a sane default so the
+    # browser-side xterm.js renderer sees the escape sequences it expects.
+    # Any explicit non-dumb TERM the operator set is preserved.
+    pty_env = _build_pty_env()
     proc = subprocess.Popen(
-        ["zellij", "attach", session_name],
+        ["tmux", "-u", "attach-session", "-t", f"{session_name}:{window_name}"],
         stdin=slave_fd,
         stdout=slave_fd,
         stderr=slave_fd,
         close_fds=True,
         preexec_fn=os.setsid,
-        env=zellij_client._build_env(),
+        env=pty_env,
     )
     os.close(slave_fd)
 
@@ -768,7 +969,7 @@ async def terminal_ws(websocket: WebSocket, terminal_id: str):
                     cols = payload.get("cols", 80)
                     winsize_data = struct.pack("HHHH", rows, cols, 0, 0)
                     fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize_data)
-                    # Explicitly notify Zellij of the size change —
+                    # Explicitly notify tmux of the size change —
                     # TIOCSWINSZ on the master doesn't always deliver
                     # SIGWINCH to the child process group.
                     try:
@@ -796,7 +997,7 @@ async def terminal_ws(websocket: WebSocket, terminal_id: str):
             os.close(master_fd)
         except OSError:
             pass
-        # Terminate Zellij attach (just detaches, doesn't kill the session)
+        # Terminate tmux attach (just detaches, doesn't kill the session)
         proc.terminate()
         try:
             await asyncio.wait_for(asyncio.to_thread(proc.wait), timeout=3.0)
@@ -968,6 +1169,11 @@ def main():
 
     host = args.host or SERVER_HOST
     port = args.port or SERVER_PORT
+    # Extend the CORS allowlist so a custom --host/--port still permits
+    # same-host browser access without requiring CAO_CORS_ORIGINS. The
+    # already-installed CORSMiddleware reads the list by reference, so
+    # mutating it before uvicorn starts is sufficient. See issue #151.
+    add_local_cors_origins(host, port)
     uvicorn.run(app, host=host, port=port)
 
 

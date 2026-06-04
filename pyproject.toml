@@ -1,6 +1,6 @@
 [project]
 name = "cli-agent-orchestrator"
-version = "2.1.1"
+version = "2.2.0"
 description = "CLI Agent Orchestrator"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -36,12 +36,14 @@ dependencies = [
     "python-frontmatter>=1.1.0",
     "watchdog==6.0.0",
     "requests>=2.32.0",
+    "rank-bm25>=0.2.2",
 ]
 
 [project.scripts]
 "cao" = "cli_agent_orchestrator.cli.main:cli"
 "cao-server" = "cli_agent_orchestrator.api.main:main"
 "cao-mcp-server" = "cli_agent_orchestrator.mcp_server.server:main"
+"cao-ops-mcp-server" = "cli_agent_orchestrator.ops_mcp_server.server:main"
 
 [project.urls]
 Homepage = "https://github.com/awslabs/cli-agent-orchestrator"
@@ -71,6 +73,7 @@ dev = [
     "isort>=5.12.0",
     "mypy>=1.5.0",
     "pytest-xdist>=3.8.0",
+    "tomli>=2.0.0; python_version < '3.11'",
 ]
 
 [tool.black]

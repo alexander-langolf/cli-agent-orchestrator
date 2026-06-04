@@ -81,6 +81,167 @@ class TestCorsOrigins:
         assert "http://127.0.0.1:3000" in CORS_ORIGINS
 
 
+class TestNetworkAllowlistEnvOverrides:
+    """Tests for env-var-driven extensions of the network allowlists (issues #149, #151).
+
+    Each override extends the built-in defaults rather than replacing them, so an
+    operator can add a Docker bridge IP or a custom origin without locking
+    themselves out of loopback access.
+    """
+
+    def _reload_constants(self, env_overrides):
+        import importlib
+        import os
+
+        env_copy = os.environ.copy()
+        # Strip any pre-set network override vars so the test starts from the
+        # documented defaults, then layer the overrides under test on top.
+        for key in ("CAO_CORS_ORIGINS", "CAO_ALLOWED_HOSTS", "CAO_WS_ALLOWED_CLIENTS"):
+            env_copy.pop(key, None)
+        env_copy.update(env_overrides)
+        with patch.dict("os.environ", env_copy, clear=True):
+            import cli_agent_orchestrator.constants as constants_module
+
+            importlib.reload(constants_module)
+            return constants_module
+
+    def test_cao_cors_origins_extends_defaults(self):
+        mod = self._reload_constants(
+            {"CAO_CORS_ORIGINS": "http://app.local,http://example.test:9000"}
+        )
+        # Use .count() == 1 instead of `in` so CodeQL's
+        # py/incomplete-url-substring-sanitization query does not
+        # pattern-match (the operand is a list, so `in` is exact-match,
+        # but the AST shape triggers a false positive).
+        origins = list(mod.CORS_ORIGINS)
+        assert origins.count("http://localhost:5173") == 1
+        assert origins.count("http://app.local") == 1
+        assert origins.count("http://example.test:9000") == 1
+
+    def test_cao_allowed_hosts_extends_defaults(self):
+        mod = self._reload_constants({"CAO_ALLOWED_HOSTS": "cao.internal,proxy.example.com"})
+        hosts = list(mod.ALLOWED_HOSTS)
+        assert hosts.count("localhost") == 1
+        assert hosts.count("127.0.0.1") == 1
+        assert hosts.count("cao.internal") == 1
+        assert hosts.count("proxy.example.com") == 1
+
+    def test_cao_ws_allowed_clients_extends_defaults(self):
+        mod = self._reload_constants({"CAO_WS_ALLOWED_CLIENTS": "172.17.0.1, 192.168.1.5"})
+        assert "127.0.0.1" in mod.WS_ALLOWED_CLIENTS
+        assert "::1" in mod.WS_ALLOWED_CLIENTS
+        assert "172.17.0.1" in mod.WS_ALLOWED_CLIENTS
+        # Leading whitespace stripped
+        assert "192.168.1.5" in mod.WS_ALLOWED_CLIENTS
+
+    def test_overrides_skip_empty_segments(self):
+        mod = self._reload_constants({"CAO_WS_ALLOWED_CLIENTS": ",,172.17.0.1,, ,"})
+        assert "" not in mod.WS_ALLOWED_CLIENTS
+        assert "172.17.0.1" in mod.WS_ALLOWED_CLIENTS
+
+    def test_defaults_when_env_not_set(self):
+        mod = self._reload_constants({})
+        # Defaults intact, no extras.
+        assert mod.WS_ALLOWED_CLIENTS == ["127.0.0.1", "::1", "localhost"]
+        assert mod.ALLOWED_HOSTS == ["localhost", "127.0.0.1"]
+        assert mod.CORS_ORIGINS == [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ]
+
+
+class TestAddLocalCorsOrigins:
+    """Tests for runtime CORS extension from the cao-server listen address (issue #151)."""
+
+    def _reload_constants(self):
+        """Reload constants with the network override env vars stripped so the
+        list under test always starts from the documented defaults."""
+        import importlib
+        import os
+
+        env_copy = os.environ.copy()
+        for key in ("CAO_CORS_ORIGINS", "CAO_ALLOWED_HOSTS", "CAO_WS_ALLOWED_CLIENTS"):
+            env_copy.pop(key, None)
+        with patch.dict("os.environ", env_copy, clear=True):
+            import cli_agent_orchestrator.constants as constants_module
+
+            importlib.reload(constants_module)
+            return constants_module
+
+    def test_custom_port_on_loopback_host_adds_localhost_and_ip_origins(self):
+        mod = self._reload_constants()
+        mod.add_local_cors_origins("127.0.0.1", 9999)
+        assert "http://localhost:9999" in mod.CORS_ORIGINS
+        assert "http://127.0.0.1:9999" in mod.CORS_ORIGINS
+
+    def test_wildcard_bind_derives_loopback_origins(self):
+        mod = self._reload_constants()
+        mod.add_local_cors_origins("0.0.0.0", 8080)
+        assert "http://localhost:8080" in mod.CORS_ORIGINS
+        assert "http://127.0.0.1:8080" in mod.CORS_ORIGINS
+
+    def test_custom_host_adds_that_host_only(self):
+        mod = self._reload_constants()
+        mod.add_local_cors_origins("cao.internal", 9889)
+        assert "http://cao.internal:9889" in mod.CORS_ORIGINS
+        assert "http://localhost:9889" not in mod.CORS_ORIGINS
+        assert "http://127.0.0.1:9889" not in mod.CORS_ORIGINS
+
+    def test_idempotent_when_called_twice(self):
+        mod = self._reload_constants()
+        mod.add_local_cors_origins("127.0.0.1", 9999)
+        mod.add_local_cors_origins("127.0.0.1", 9999)
+        assert mod.CORS_ORIGINS.count("http://localhost:9999") == 1
+        assert mod.CORS_ORIGINS.count("http://127.0.0.1:9999") == 1
+
+    def test_default_port_does_not_duplicate_existing_origins(self):
+        mod = self._reload_constants()
+        # 5173 is already in the built-in defaults; calling with that port
+        # must not add a duplicate entry.
+        mod.add_local_cors_origins("127.0.0.1", 5173)
+        assert mod.CORS_ORIGINS.count("http://localhost:5173") == 1
+        assert mod.CORS_ORIGINS.count("http://127.0.0.1:5173") == 1
+
+    def test_mutation_is_observable_through_existing_reference(self):
+        """CORSMiddleware stores the list by reference. Mutating the module
+        attribute after middleware install must be visible to anyone holding
+        a prior reference, otherwise the runtime extension does nothing."""
+        mod = self._reload_constants()
+        captured = mod.CORS_ORIGINS  # the reference the middleware would hold
+        mod.add_local_cors_origins("127.0.0.1", 7777)
+        assert "http://localhost:7777" in captured
+        assert "http://127.0.0.1:7777" in captured
+
+    def test_ipv6_loopback_adds_all_loopback_aliases(self):
+        """``::1`` is loopback like ``127.0.0.1`` / ``localhost``: any of the
+        three should grant same-host access from a browser that picks any of
+        the others, so all three origins are added."""
+        mod = self._reload_constants()
+        mod.add_local_cors_origins("::1", 9999)
+        assert "http://localhost:9999" in mod.CORS_ORIGINS
+        assert "http://127.0.0.1:9999" in mod.CORS_ORIGINS
+        assert "http://[::1]:9999" in mod.CORS_ORIGINS
+
+    def test_ipv6_wildcard_bind_includes_bracketed_loopback(self):
+        """Binding on ``::`` must also allow IPv6 loopback in brackets — that
+        is the form a browser actually emits in ``Origin``."""
+        mod = self._reload_constants()
+        mod.add_local_cors_origins("::", 8080)
+        assert "http://[::1]:8080" in mod.CORS_ORIGINS
+
+    def test_ipv6_literal_host_is_bracketed(self):
+        """A non-loopback IPv6 literal must be formatted with brackets so the
+        derived origin matches the ``Origin`` header the browser sends."""
+        mod = self._reload_constants()
+        mod.add_local_cors_origins("2001:db8::1", 9889)
+        assert "http://[2001:db8::1]:9889" in mod.CORS_ORIGINS
+        # The unbracketed form would never match a real Origin header and so
+        # would only bloat the allowlist — guard against accidental reintro.
+        assert "http://2001:db8::1:9889" not in mod.CORS_ORIGINS
+
+
 class TestCaoHomeDir:
     """Tests for CAO home directory constants."""
 

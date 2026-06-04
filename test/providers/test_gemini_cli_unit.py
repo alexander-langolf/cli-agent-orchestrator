@@ -30,6 +30,7 @@ from cli_agent_orchestrator.providers.gemini_cli import (
     YOLO_INDICATOR_PATTERN,
     GeminiCliProvider,
     ProviderError,
+    _ensure_workspaces_parent_trusted,
 )
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -50,8 +51,8 @@ class TestGeminiCliProviderInitialization:
 
     @patch("cli_agent_orchestrator.providers.gemini_cli.time")
     @patch("cli_agent_orchestrator.providers.gemini_cli.wait_for_shell", return_value=True)
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_initialize_success(self, mock_Zellij, mock_wait_shell, mock_time):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_initialize_success(self, mock_tmux, mock_wait_shell, mock_time):
         """Test successful initialization sends warm-up + gemini command and reaches IDLE."""
         # Configure time mock: first call returns 0 (warm-up start), subsequent calls
         # for the init loop need to return 0 then trigger the IDLE status check.
@@ -59,19 +60,19 @@ class TestGeminiCliProviderInitialization:
         mock_time.sleep = MagicMock()
         # Simulate warm-up marker appearing in shell output, then IDLE status
         idle_output = " *   Type your message or @path/to/file\n"
-        mock_Zellij.get_history.side_effect = ["CAO_SHELL_READY", idle_output]
+        mock_tmux.get_history.side_effect = ["CAO_SHELL_READY", idle_output]
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         result = provider.initialize()
 
         assert result is True
         assert provider._initialized is True
-        assert mock_Zellij.send_keys.call_count == 2  # warm-up echo + gemini command
-        mock_Zellij.send_keys.assert_any_call("session-1", "window-1", "echo CAO_SHELL_READY")
+        assert mock_tmux.send_keys.call_count == 2  # warm-up echo + gemini command
+        mock_tmux.send_keys.assert_any_call("session-1", "window-1", "echo CAO_SHELL_READY")
         mock_wait_shell.assert_called_once()
 
     @patch("cli_agent_orchestrator.providers.gemini_cli.wait_for_shell", return_value=False)
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_initialize_shell_timeout(self, mock_Zellij, mock_wait_shell):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_initialize_shell_timeout(self, mock_tmux, mock_wait_shell):
         """Test shell init timeout raises TimeoutError."""
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         with pytest.raises(TimeoutError, match="Shell initialization"):
@@ -79,8 +80,8 @@ class TestGeminiCliProviderInitialization:
 
     @patch("cli_agent_orchestrator.providers.gemini_cli.time")
     @patch("cli_agent_orchestrator.providers.gemini_cli.wait_for_shell", return_value=True)
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_initialize_gemini_timeout(self, mock_Zellij, mock_wait_shell, mock_time):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_initialize_gemini_timeout(self, mock_tmux, mock_wait_shell, mock_time):
         """Test Gemini CLI init timeout raises TimeoutError."""
         # Simulate time progressing past timeout (120s)
         call_count = [0]
@@ -92,23 +93,23 @@ class TestGeminiCliProviderInitialization:
         mock_time.time.side_effect = advancing_time
         mock_time.sleep = MagicMock()
         # Warm-up succeeds, but CLI never reaches IDLE (always returns PROCESSING)
-        mock_Zellij.get_history.return_value = "CAO_SHELL_READY"
+        mock_tmux.get_history.return_value = "CAO_SHELL_READY"
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         with pytest.raises(TimeoutError, match="Gemini CLI initialization timed out"):
             provider.initialize()
 
     @patch("cli_agent_orchestrator.providers.gemini_cli.time")
     @patch("cli_agent_orchestrator.providers.gemini_cli.wait_for_shell", return_value=True)
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
     @patch("cli_agent_orchestrator.providers.gemini_cli.load_agent_profile")
     def test_initialize_with_mcp_servers(
-        self, mock_load, mock_Zellij, mock_wait_shell, mock_time, tmp_path
+        self, mock_load, mock_tmux, mock_wait_shell, mock_time, tmp_path
     ):
         """Test initialization with MCP servers writes to settings.json."""
         mock_time.time.side_effect = [0, 0, 0, 0, 0]
         mock_time.sleep = MagicMock()
         idle_output = " *   Type your message or @path/to/file\n"
-        mock_Zellij.get_history.side_effect = ["CAO_SHELL_READY", idle_output]
+        mock_tmux.get_history.side_effect = ["CAO_SHELL_READY", idle_output]
         mock_profile = MagicMock()
         mock_profile.model = None
         mock_profile.system_prompt = None
@@ -140,27 +141,27 @@ class TestGeminiCliProviderInitialization:
         assert settings["mcpServers"]["cao-mcp-server"]["command"] == "npx"
         assert settings["mcpServers"]["cao-mcp-server"]["env"]["CAO_TERMINAL_ID"] == "term-1"
         # Command should be plain gemini launch (no chained mcp add)
-        call_args = mock_Zellij.send_keys.call_args_list[1]
+        call_args = mock_tmux.send_keys.call_args_list[1]
         command = call_args[0][2]
         assert command == "gemini --yolo --sandbox false"
         assert "cao-mcp-server" in provider._mcp_server_names
 
     @patch("cli_agent_orchestrator.providers.gemini_cli.time")
     @patch("cli_agent_orchestrator.providers.gemini_cli.wait_for_shell", return_value=True)
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_initialize_sends_gemini_command(self, mock_Zellij, mock_wait_shell, mock_time):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_initialize_sends_gemini_command(self, mock_tmux, mock_wait_shell, mock_time):
         """Test that initialize sends warm-up echo then the correct gemini --yolo command."""
         mock_time.time.side_effect = [0, 0, 0, 0, 0]
         mock_time.sleep = MagicMock()
         idle_output = " *   Type your message or @path/to/file\n"
-        mock_Zellij.get_history.side_effect = ["CAO_SHELL_READY", idle_output]
+        mock_tmux.get_history.side_effect = ["CAO_SHELL_READY", idle_output]
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         provider.initialize()
 
         # First call: warm-up echo
-        assert mock_Zellij.send_keys.call_args_list[0][0][2] == "echo CAO_SHELL_READY"
+        assert mock_tmux.send_keys.call_args_list[0][0][2] == "echo CAO_SHELL_READY"
         # Second call: gemini command
-        assert mock_Zellij.send_keys.call_args_list[1][0][2] == "gemini --yolo --sandbox false"
+        assert mock_tmux.send_keys.call_args_list[1][0][2] == "gemini --yolo --sandbox false"
 
     @patch("cli_agent_orchestrator.providers.gemini_cli.load_agent_profile")
     def test_initialize_with_invalid_profile(self, mock_load):
@@ -173,10 +174,10 @@ class TestGeminiCliProviderInitialization:
 
     @patch("cli_agent_orchestrator.providers.gemini_cli.time")
     @patch("cli_agent_orchestrator.providers.gemini_cli.wait_for_shell", return_value=True)
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
     @patch("cli_agent_orchestrator.providers.gemini_cli.load_agent_profile")
     def test_initialize_with_prompt_interactive_waits_for_completed(
-        self, mock_load, mock_Zellij, mock_wait_shell, mock_time
+        self, mock_load, mock_tmux, mock_wait_shell, mock_time
     ):
         """Test that -i flag makes initialize() wait for COMPLETED, not IDLE.
 
@@ -200,12 +201,12 @@ class TestGeminiCliProviderInitialization:
             "✦ I understand. I am a supervisor.\n"
             " *   Type your message or @path/to/file\n"
         )
-        mock_Zellij.get_history.side_effect = [
+        mock_tmux.get_history.side_effect = [
             "CAO_SHELL_READY",
             idle_output,  # 1st status check: IDLE — skipped because -i requires COMPLETED
             completed_output,  # 2nd status check: COMPLETED — accepted
         ]
-        mock_Zellij.get_pane_working_directory.return_value = None
+        mock_tmux.get_pane_working_directory.return_value = None
 
         provider = GeminiCliProvider("term-1", "session-1", "window-1", agent_profile="supervisor")
         result = provider.initialize()
@@ -222,15 +223,15 @@ class TestGeminiCliProviderInitialization:
         assert provider._uses_prompt_interactive is False
 
     @patch("cli_agent_orchestrator.providers.gemini_cli.load_agent_profile")
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_build_command_sets_prompt_interactive_flag(self, mock_Zellij, mock_load):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_build_command_sets_prompt_interactive_flag(self, mock_tmux, mock_load):
         """Test _build_gemini_command sets _uses_prompt_interactive when -i is used."""
         mock_profile = MagicMock()
         mock_profile.model = None
         mock_profile.system_prompt = "You are a supervisor."
         mock_profile.mcpServers = {}
         mock_load.return_value = mock_profile
-        mock_Zellij.get_pane_working_directory.return_value = None
+        mock_tmux.get_pane_working_directory.return_value = None
 
         provider = GeminiCliProvider("term-1", "session-1", "window-1", agent_profile="supervisor")
         command = provider._build_gemini_command()
@@ -239,8 +240,8 @@ class TestGeminiCliProviderInitialization:
         assert "-i" in command
 
     @patch("cli_agent_orchestrator.providers.gemini_cli.load_agent_profile")
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_build_command_no_prompt_interactive_without_system_prompt(self, mock_Zellij, mock_load):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_build_command_no_prompt_interactive_without_system_prompt(self, mock_tmux, mock_load):
         """Test _uses_prompt_interactive stays False when profile has no system prompt."""
         mock_profile = MagicMock()
         mock_profile.model = None
@@ -263,57 +264,57 @@ class TestGeminiCliProviderInitialization:
 class TestGeminiCliProviderStatusDetection:
     """Tests for GeminiCliProvider.get_status()."""
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_get_status_idle(self, mock_Zellij):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_get_status_idle(self, mock_tmux):
         """Test IDLE detection from fresh startup output."""
-        mock_Zellij.get_history.return_value = _read_fixture("gemini_cli_idle_output.txt")
+        mock_tmux.get_history.return_value = _read_fixture("gemini_cli_idle_output.txt")
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         assert provider.get_status() == TerminalStatus.IDLE
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_get_status_completed(self, mock_Zellij):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_get_status_completed(self, mock_tmux):
         """Test COMPLETED detection when response is present with prompt."""
-        mock_Zellij.get_history.return_value = _read_fixture("gemini_cli_completed_output.txt")
+        mock_tmux.get_history.return_value = _read_fixture("gemini_cli_completed_output.txt")
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         assert provider.get_status() == TerminalStatus.COMPLETED
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_get_status_completed_complex(self, mock_Zellij):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_get_status_completed_complex(self, mock_tmux):
         """Test COMPLETED detection with tool call response."""
-        mock_Zellij.get_history.return_value = _read_fixture("gemini_cli_complex_response.txt")
+        mock_tmux.get_history.return_value = _read_fixture("gemini_cli_complex_response.txt")
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         assert provider.get_status() == TerminalStatus.COMPLETED
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_get_status_processing(self, mock_Zellij):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_get_status_processing(self, mock_tmux):
         """Test PROCESSING detection when user query is in input box."""
-        mock_Zellij.get_history.return_value = _read_fixture("gemini_cli_processing_output.txt")
+        mock_tmux.get_history.return_value = _read_fixture("gemini_cli_processing_output.txt")
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         assert provider.get_status() == TerminalStatus.PROCESSING
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_get_status_error_empty(self, mock_Zellij):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_get_status_error_empty(self, mock_tmux):
         """Test ERROR on empty output."""
-        mock_Zellij.get_history.return_value = ""
+        mock_tmux.get_history.return_value = ""
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         assert provider.get_status() == TerminalStatus.ERROR
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_get_status_error_none(self, mock_Zellij):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_get_status_error_none(self, mock_tmux):
         """Test ERROR on None output."""
-        mock_Zellij.get_history.return_value = None
+        mock_tmux.get_history.return_value = None
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         assert provider.get_status() == TerminalStatus.ERROR
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_get_status_error_pattern(self, mock_Zellij):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_get_status_error_pattern(self, mock_tmux):
         """Test ERROR detection from error output fixture."""
-        mock_Zellij.get_history.return_value = _read_fixture("gemini_cli_error_output.txt")
+        mock_tmux.get_history.return_value = _read_fixture("gemini_cli_error_output.txt")
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         assert provider.get_status() == TerminalStatus.ERROR
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_get_status_idle_with_ansi_codes(self, mock_Zellij):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_get_status_idle_with_ansi_codes(self, mock_tmux):
         """Test IDLE detection with ANSI escape codes in output."""
         output = (
             "\x1b[38;2;71;150;228m ███ GEMINI BANNER \x1b[0m\n"
@@ -323,20 +324,20 @@ class TestGeminiCliProviderStatusDetection:
             "\x1b[30m▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
             "\x1b[39m ~/dir (main)   sandbox   Auto\n"
         )
-        mock_Zellij.get_history.return_value = output
+        mock_tmux.get_history.return_value = output
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         assert provider.get_status() == TerminalStatus.IDLE
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_get_status_with_tail_lines(self, mock_Zellij):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_get_status_with_tail_lines(self, mock_tmux):
         """Test status detection with tail_lines parameter passed through."""
-        mock_Zellij.get_history.return_value = _read_fixture("gemini_cli_idle_output.txt")
+        mock_tmux.get_history.return_value = _read_fixture("gemini_cli_idle_output.txt")
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         provider.get_status(tail_lines=20)
-        mock_Zellij.get_history.assert_called_once_with("session-1", "window-1", tail_lines=20)
+        mock_tmux.get_history.assert_called_once_with("session-1", "window-1", tail_lines=20)
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_get_status_idle_tall_terminal(self, mock_Zellij):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_get_status_idle_tall_terminal(self, mock_tmux):
         """Test IDLE detection in tall terminals (46+ rows) where prompt is far from bottom.
 
         In a tall terminal, the welcome banner and input box may be far from the
@@ -352,12 +353,12 @@ class TestGeminiCliProviderStatusDetection:
             + "\n" * 32  # 32 empty padding lines (typical for tall terminal)
             + " .../project (main*)   sandbox   Auto (Gemini 3) /model | 200 MB\n"
         )
-        mock_Zellij.get_history.return_value = output
+        mock_tmux.get_history.return_value = output
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         assert provider.get_status() == TerminalStatus.IDLE
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_get_status_processing_no_idle_prompt(self, mock_Zellij):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_get_status_processing_no_idle_prompt(self, mock_tmux):
         """Test PROCESSING when response is mid-stream (no idle prompt, no error)."""
         output = (
             "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
@@ -367,12 +368,12 @@ class TestGeminiCliProviderStatusDetection:
             "✦ Here's the function:\n"
             "\n"
         )
-        mock_Zellij.get_history.return_value = output
+        mock_tmux.get_history.return_value = output
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         assert provider.get_status() == TerminalStatus.PROCESSING
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_get_status_not_error_when_response_mentions_error(self, mock_Zellij):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_get_status_not_error_when_response_mentions_error(self, mock_tmux):
         """Test COMPLETED (not ERROR) when response text discusses errors.
 
         The ✦ response may contain text like 'Error: you need to fix...' which
@@ -393,12 +394,12 @@ class TestGeminiCliProviderStatusDetection:
             "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
             " .../dir (main)   no sandbox   Auto (Gemini 3) /model | 100 MB\n"
         )
-        mock_Zellij.get_history.return_value = output
+        mock_tmux.get_history.return_value = output
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         assert provider.get_status() == TerminalStatus.COMPLETED
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_get_status_processing_spinner_with_idle_prompt(self, mock_Zellij):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_get_status_processing_spinner_with_idle_prompt(self, mock_tmux):
         """Test PROCESSING when spinner is visible despite idle prompt being shown.
 
         Gemini's Ink TUI keeps the idle input box visible at the bottom at ALL
@@ -423,12 +424,12 @@ class TestGeminiCliProviderStatusDetection:
             "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
             " .../dir (main)   no sandbox   Auto (Gemini 3) /model | 234 MB\n"
         )
-        mock_Zellij.get_history.return_value = output
+        mock_tmux.get_history.return_value = output
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         assert provider.get_status() == TerminalStatus.PROCESSING
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_get_status_processing_spinner_retry(self, mock_Zellij):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_get_status_processing_spinner_retry(self, mock_tmux):
         """Test PROCESSING when model is retrying API call (Attempt N/M spinner)."""
         output = (
             "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
@@ -442,12 +443,12 @@ class TestGeminiCliProviderStatusDetection:
             "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
             " .../dir (main)   no sandbox   Auto (Gemini 3) /model | 100 MB\n"
         )
-        mock_Zellij.get_history.return_value = output
+        mock_tmux.get_history.return_value = output
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         assert provider.get_status() == TerminalStatus.PROCESSING
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_get_status_completed_no_spinner(self, mock_Zellij):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_get_status_completed_no_spinner(self, mock_tmux):
         """Test COMPLETED when response finished and no spinner is present.
 
         After the model finishes processing (no spinner), idle prompt visible,
@@ -469,12 +470,12 @@ class TestGeminiCliProviderStatusDetection:
             "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
             " .../dir (main)   no sandbox   Auto (Gemini 3) /model | 234 MB\n"
         )
-        mock_Zellij.get_history.return_value = output
+        mock_tmux.get_history.return_value = output
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         assert provider.get_status() == TerminalStatus.COMPLETED
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
-    def test_get_status_processing_multi_turn_old_response(self, mock_Zellij):
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
+    def test_get_status_processing_multi_turn_old_response(self, mock_tmux):
         """Test PROCESSING on second query when old ✦ response is in scrollback.
 
         In a multi-turn conversation, the scrollback contains ✦ from the first
@@ -493,7 +494,7 @@ class TestGeminiCliProviderStatusDetection:
             "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
             "  Responding with gemini-3-flash-preview\n"
         )
-        mock_Zellij.get_history.return_value = output
+        mock_tmux.get_history.return_value = output
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         assert provider.get_status() == TerminalStatus.PROCESSING
 
@@ -534,10 +535,12 @@ class TestGeminiCliProviderMessageExtraction:
     def test_extract_message_empty_response(self):
         """Test ValueError on empty response after query."""
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
+        # Query box in gemini-cli 0.40.x: ▄ above, ▀ below. Idle prompt box at
+        # bottom mirrors: ▄ above, ▀ below.
         output = (
-            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
-            " > test message\n"
             "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
+            " > test message\n"
+            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
             " *   Type your message or @path/to/file\n"
         )
         with pytest.raises(ValueError, match="Empty Gemini CLI response"):
@@ -547,16 +550,16 @@ class TestGeminiCliProviderMessageExtraction:
         """Test that input box borders, status bar, YOLO indicator are filtered."""
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         output = (
-            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
-            " > say hello\n"
             "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
+            " > say hello\n"
+            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
             "  Responding with gemini-3-flash-preview\n"
             "✦ Hello! How can I help?\n"
             "\n"
             "                                YOLO mode (ctrl + y to toggle)\n"
-            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
-            " *   Type your message or @path/to/file\n"
             "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
+            " *   Type your message or @path/to/file\n"
+            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
             " .../dir (main)   no sandbox   Auto (Gemini 3) /model | 100 MB\n"
         )
         result = provider.extract_last_message_from_script(output)
@@ -573,13 +576,13 @@ class TestGeminiCliProviderMessageExtraction:
         """Test extraction picks content from last user query."""
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         output = (
-            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
+            "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
             " > first question\n"
-            "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
-            "✦ First answer\n"
             "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
-            " > second question\n"
+            "✦ First answer\n"
             "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
+            " > second question\n"
+            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
             "✦ Second answer\n"
             " *   Type your message or @path/to/file\n"
         )
@@ -590,9 +593,9 @@ class TestGeminiCliProviderMessageExtraction:
         """Test extraction works when there's no trailing idle prompt."""
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         output = (
-            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
-            " > what is python?\n"
             "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
+            " > what is python?\n"
+            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
             "✦ Python is a programming language.\n"
             "✦ It supports multiple paradigms.\n"
         )
@@ -604,9 +607,9 @@ class TestGeminiCliProviderMessageExtraction:
         """Test extraction includes tool call box content."""
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         output = (
-            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
-            " > read the file\n"
             "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
+            " > read the file\n"
+            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
             "✦ Let me read the file.\n"
             "╭──────────────────────────────╮\n"
             "│ ✓  ReadFile test.txt          │\n"
@@ -625,9 +628,9 @@ class TestGeminiCliProviderMessageExtraction:
         """
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         output = (
-            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
-            " > hello\n"
             "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
+            " > hello\n"
+            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
             "✦ Hello there!\n"
             " .../dir (main)   no sandbox   Auto (Gemini 3) /model | 100 MB\n"
             " *   Type your message or @path/to/file\n"
@@ -641,9 +644,9 @@ class TestGeminiCliProviderMessageExtraction:
         """Test that processing spinner lines are filtered from extracted response."""
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         output = (
-            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
-            " > create a report\n"
             "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
+            " > create a report\n"
+            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
             "  Responding with gemini-3-flash-preview\n"
             "✦ Here is the report:\n"
             "✦ Summary section content.\n"
@@ -660,9 +663,9 @@ class TestGeminiCliProviderMessageExtraction:
         """Test extraction strips ANSI codes correctly."""
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         output = (
-            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
-            " \x1b[38;2;203;166;247m> \x1b[38;2;108;112;134mhello\x1b[39m\n"
             "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
+            " \x1b[38;2;203;166;247m> \x1b[38;2;108;112;134mhello\x1b[39m\n"
+            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
             "\x1b[38;2;203;166;247m✦ \x1b[39mHi there!\n"
             " \x1b[38;2;243;139;168m*\x1b[39m   Type your message\n"
         )
@@ -673,15 +676,15 @@ class TestGeminiCliProviderMessageExtraction:
         """Test extraction skips wrapped query text inside the query box.
 
         When a long query wraps in the input box, only the first line gets
-        the > prefix. Continuation lines (between ▀ and ▄ borders) must not
+        the > prefix. Continuation lines (between ▄ and ▀ borders) must not
         be included in the extracted response.
         """
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
         output = (
-            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
+            "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
             " > Analyze Dataset A: [1, 2, 3, 4, 5]. Calculate mean, median, and standard\n"
             "   deviation. Present your analysis results directly.\n"
-            "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
+            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
             "  Responding with gemini-3-flash-preview\n"
             "✦ Here is the analysis of Dataset A:\n"
             "✦ - Mean: 3.0\n"
@@ -766,42 +769,52 @@ class TestGeminiCliProviderBuildCommand:
         assert settings["mcpServers"]["my-server"]["args"] == ["server.js"]
         assert settings["mcpServers"]["my-server"]["env"]["CAO_TERMINAL_ID"] == "term-1"
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
     @patch("cli_agent_orchestrator.providers.gemini_cli.load_agent_profile")
-    def test_build_command_profile_no_mcp(self, mock_load, mock_Zellij, tmp_path):
-        """Test command with profile writes GEMINI.md and uses short -i acknowledgment."""
+    def test_build_command_profile_no_mcp(self, mock_load, tmp_path):
+        """Test command writes GEMINI.md in a per-terminal workspace and cds into it."""
         mock_profile = MagicMock()
         mock_profile.model = None
         mock_profile.name = "developer"
         mock_profile.system_prompt = "You are a developer"
         mock_profile.mcpServers = None
         mock_load.return_value = mock_profile
-        mock_Zellij.get_pane_working_directory.return_value = str(tmp_path)
 
-        provider = GeminiCliProvider("term-1", "session-1", "window-1", agent_profile="dev")
-        command = provider._build_gemini_command()
+        with (
+            patch(
+                "cli_agent_orchestrator.providers.gemini_cli.GEMINI_WORKSPACES_DIR",
+                tmp_path / "gemini-workspaces",
+            ),
+            patch(
+                "cli_agent_orchestrator.providers.gemini_cli.Path.home",
+                return_value=tmp_path,
+            ),
+        ):
+            provider = GeminiCliProvider("term-1", "session-1", "window-1", agent_profile="dev")
+            command = provider._build_gemini_command()
 
-        # GEMINI.md written with full system prompt
-        gemini_md = tmp_path / "GEMINI.md"
+        workspace = tmp_path / "gemini-workspaces" / "term-1"
+        gemini_md = workspace / "GEMINI.md"
         assert gemini_md.exists()
-        assert gemini_md.read_text() == "You are a developer"
-        assert provider._gemini_md_path == str(gemini_md)
+        assert gemini_md.read_text(encoding="utf-8") == "You are a developer"
+        assert provider._gemini_workspace == workspace
+        # Launcher cd's into the workspace before exec'ing gemini.
+        assert command.startswith(f"cd {workspace} && gemini")
         # Short -i acknowledgment (not the full system prompt)
         assert "-i" in command
         assert "developer" in command
         assert "GEMINI.md" in command
-        # Full system prompt should NOT be in the command (it's in GEMINI.md)
+        # Full system prompt must stay in GEMINI.md, not in the command.
         assert "You are a developer" not in command
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
     @patch("cli_agent_orchestrator.providers.gemini_cli.load_agent_profile")
-    def test_build_command_system_prompt_backs_up_existing_gemini_md(
-        self, mock_load, mock_Zellij, tmp_path
-    ):
-        """Test GEMINI.md backup when user already has one in the working directory."""
-        # Create an existing GEMINI.md
-        existing_md = tmp_path / "GEMINI.md"
-        existing_md.write_text("User's existing instructions")
+    def test_build_command_does_not_touch_user_gemini_md(self, mock_load, tmp_path):
+        """Each terminal writes to its own workspace — never to the user's cwd."""
+        # Simulate a GEMINI.md already sitting in what was previously treated as
+        # the working directory. The fix is that we never look at cwd at all.
+        user_project = tmp_path / "user_project"
+        user_project.mkdir()
+        user_gemini = user_project / "GEMINI.md"
+        user_gemini.write_text("User's real instructions")
 
         mock_profile = MagicMock()
         mock_profile.model = None
@@ -809,39 +822,57 @@ class TestGeminiCliProviderBuildCommand:
         mock_profile.system_prompt = "Supervisor agent prompt"
         mock_profile.mcpServers = None
         mock_load.return_value = mock_profile
-        mock_Zellij.get_pane_working_directory.return_value = str(tmp_path)
 
-        provider = GeminiCliProvider("term-1", "session-1", "window-1", agent_profile="dev")
-        command = provider._build_gemini_command()
+        with (
+            patch(
+                "cli_agent_orchestrator.providers.gemini_cli.GEMINI_WORKSPACES_DIR",
+                tmp_path / "gemini-workspaces",
+            ),
+            patch(
+                "cli_agent_orchestrator.providers.gemini_cli.Path.home",
+                return_value=tmp_path,
+            ),
+        ):
+            provider = GeminiCliProvider("term-1", "session-1", "window-1", agent_profile="dev")
+            provider._build_gemini_command()
 
-        # -i flag with short acknowledgment
-        assert "-i" in command
-        # GEMINI.md backed up and overwritten with full system prompt
-        assert existing_md.read_text() == "Supervisor agent prompt"
-        backup = tmp_path / "GEMINI.md.cao_backup"
-        assert backup.exists()
-        assert backup.read_text() == "User's existing instructions"
-        assert provider._gemini_md_backup_path == str(backup)
+        # User's GEMINI.md must be untouched.
+        assert user_gemini.read_text() == "User's real instructions"
+        # Provider wrote its own prompt to its isolated workspace.
+        workspace_md = tmp_path / "gemini-workspaces" / "term-1" / "GEMINI.md"
+        assert workspace_md.read_text(encoding="utf-8") == "Supervisor agent prompt"
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
     @patch("cli_agent_orchestrator.providers.gemini_cli.load_agent_profile")
-    def test_build_command_system_prompt_no_working_dir(self, mock_load, mock_Zellij):
-        """Test -i flag still used when working dir unavailable (GEMINI.md skipped)."""
+    def test_build_command_parallel_terminals_do_not_collide(self, mock_load, tmp_path):
+        """Two terminals built concurrently get distinct workspaces, not a shared one."""
         mock_profile = MagicMock()
         mock_profile.model = None
         mock_profile.name = "developer"
-        mock_profile.system_prompt = "You are a developer"
         mock_profile.mcpServers = None
         mock_load.return_value = mock_profile
-        mock_Zellij.get_pane_working_directory.return_value = None
 
-        provider = GeminiCliProvider("term-1", "session-1", "window-1", agent_profile="dev")
-        command = provider._build_gemini_command()
+        with (
+            patch(
+                "cli_agent_orchestrator.providers.gemini_cli.GEMINI_WORKSPACES_DIR",
+                tmp_path / "gemini-workspaces",
+            ),
+            patch(
+                "cli_agent_orchestrator.providers.gemini_cli.Path.home",
+                return_value=tmp_path,
+            ),
+        ):
+            mock_profile.system_prompt = "Prompt A"
+            provider_a = GeminiCliProvider("term-A", "session-A", "window-A", agent_profile="dev")
+            provider_a._build_gemini_command()
 
-        # -i flag with short acknowledgment (GEMINI.md skipped since no working dir)
-        assert "-i" in command
-        assert "developer" in command
-        assert provider._gemini_md_path is None
+            mock_profile.system_prompt = "Prompt B"
+            provider_b = GeminiCliProvider("term-B", "session-B", "window-B", agent_profile="dev")
+            provider_b._build_gemini_command()
+
+        md_a = tmp_path / "gemini-workspaces" / "term-A" / "GEMINI.md"
+        md_b = tmp_path / "gemini-workspaces" / "term-B" / "GEMINI.md"
+        assert md_a.read_text(encoding="utf-8") == "Prompt A"
+        assert md_b.read_text(encoding="utf-8") == "Prompt B"
 
     @patch("cli_agent_orchestrator.providers.gemini_cli.load_agent_profile")
     def test_build_command_profile_error(self, mock_load):
@@ -884,6 +915,122 @@ class TestGeminiCliProviderBuildCommand:
 
 
 # =============================================================================
+# Trust-bootstrap tests (_ensure_workspaces_parent_trusted)
+# =============================================================================
+
+
+class TestEnsureWorkspacesParentTrusted:
+    """Tests for the Gemini trustedFolders.json bootstrap helper.
+
+    Gemini CLI 0.40+ blocks every new-folder launch on an interactive
+    "Do you trust the files in this folder?" prompt. Registering the
+    per-terminal workspaces parent with TRUST_PARENT pre-approves every
+    current and future subdirectory in a single entry.
+    """
+
+    def test_creates_trustedfolders_when_missing(self, tmp_path):
+        """No existing ~/.gemini/trustedFolders.json — helper creates it."""
+        workspaces = tmp_path / "cao" / "gemini-workspaces"
+        with (
+            patch(
+                "cli_agent_orchestrator.providers.gemini_cli.GEMINI_WORKSPACES_DIR",
+                workspaces,
+            ),
+            patch(
+                "cli_agent_orchestrator.providers.gemini_cli.Path.home",
+                return_value=tmp_path,
+            ),
+        ):
+            _ensure_workspaces_parent_trusted()
+
+        import json as _json
+
+        trust_file = tmp_path / ".gemini" / "trustedFolders.json"
+        assert trust_file.exists()
+        data = _json.loads(trust_file.read_text())
+        assert data[str(workspaces)] == "TRUST_PARENT"
+
+    def test_preserves_existing_entries(self, tmp_path):
+        """Existing entries (e.g., user's other trusted dirs) must be preserved."""
+        import json as _json
+
+        gemini_dir = tmp_path / ".gemini"
+        gemini_dir.mkdir()
+        trust_file = gemini_dir / "trustedFolders.json"
+        trust_file.write_text(_json.dumps({"/Users/someone/repo": "TRUST_FOLDER"}, indent=2))
+
+        workspaces = tmp_path / "cao" / "gemini-workspaces"
+        with (
+            patch(
+                "cli_agent_orchestrator.providers.gemini_cli.GEMINI_WORKSPACES_DIR",
+                workspaces,
+            ),
+            patch(
+                "cli_agent_orchestrator.providers.gemini_cli.Path.home",
+                return_value=tmp_path,
+            ),
+        ):
+            _ensure_workspaces_parent_trusted()
+
+        data = _json.loads(trust_file.read_text())
+        assert data["/Users/someone/repo"] == "TRUST_FOLDER"
+        assert data[str(workspaces)] == "TRUST_PARENT"
+
+    def test_is_idempotent_when_already_trusted(self, tmp_path):
+        """Entry already present — helper must be a no-op (no rewrite)."""
+        import json as _json
+
+        gemini_dir = tmp_path / ".gemini"
+        gemini_dir.mkdir()
+        workspaces = tmp_path / "cao" / "gemini-workspaces"
+        trust_file = gemini_dir / "trustedFolders.json"
+        trust_file.write_text(_json.dumps({str(workspaces): "TRUST_PARENT"}, indent=2))
+        mtime_before = trust_file.stat().st_mtime_ns
+
+        with (
+            patch(
+                "cli_agent_orchestrator.providers.gemini_cli.GEMINI_WORKSPACES_DIR",
+                workspaces,
+            ),
+            patch(
+                "cli_agent_orchestrator.providers.gemini_cli.Path.home",
+                return_value=tmp_path,
+            ),
+        ):
+            _ensure_workspaces_parent_trusted()
+
+        # File not rewritten — mtime unchanged.
+        assert trust_file.stat().st_mtime_ns == mtime_before
+
+    def test_non_fatal_on_io_error(self, tmp_path, caplog):
+        """An unwritable trustedFolders.json must not raise — just log."""
+        import logging
+
+        gemini_dir = tmp_path / ".gemini"
+        gemini_dir.mkdir()
+        trust_file = gemini_dir / "trustedFolders.json"
+        # Write invalid JSON so json.load raises.
+        trust_file.write_text("{not valid json")
+
+        workspaces = tmp_path / "cao" / "gemini-workspaces"
+        with (
+            patch(
+                "cli_agent_orchestrator.providers.gemini_cli.GEMINI_WORKSPACES_DIR",
+                workspaces,
+            ),
+            patch(
+                "cli_agent_orchestrator.providers.gemini_cli.Path.home",
+                return_value=tmp_path,
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            # Must not raise.
+            _ensure_workspaces_parent_trusted()
+
+        assert any("trustedFolders.json" in rec.getMessage() for rec in caplog.records)
+
+
+# =============================================================================
 # Misc / lifecycle tests
 # =============================================================================
 
@@ -891,10 +1038,10 @@ class TestGeminiCliProviderBuildCommand:
 class TestGeminiCliProviderModelFlag:
     """Tests that profile.model is forwarded to Gemini CLI via --model."""
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
     @patch("cli_agent_orchestrator.providers.gemini_cli.load_agent_profile")
-    def test_build_command_appends_model_when_set(self, mock_load, mock_Zellij, tmp_path):
-        mock_Zellij.get_pane_working_directory.return_value = str(tmp_path)
+    def test_build_command_appends_model_when_set(self, mock_load, mock_tmux, tmp_path):
+        mock_tmux.get_pane_working_directory.return_value = str(tmp_path)
         mock_profile = MagicMock()
         mock_profile.model = "gemini-2.5-pro"
         mock_profile.name = "agent"
@@ -907,10 +1054,10 @@ class TestGeminiCliProviderModelFlag:
 
         assert "--model gemini-2.5-pro" in command
 
-    @patch("cli_agent_orchestrator.providers.gemini_cli.zellij_client")
+    @patch("cli_agent_orchestrator.providers.gemini_cli.tmux_client")
     @patch("cli_agent_orchestrator.providers.gemini_cli.load_agent_profile")
-    def test_build_command_omits_model_when_unset(self, mock_load, mock_Zellij, tmp_path):
-        mock_Zellij.get_pane_working_directory.return_value = str(tmp_path)
+    def test_build_command_omits_model_when_unset(self, mock_load, mock_tmux, tmp_path):
+        mock_tmux.get_pane_working_directory.return_value = str(tmp_path)
         mock_profile = MagicMock()
         mock_profile.model = None
         mock_profile.name = "agent"
@@ -996,36 +1143,28 @@ class TestGeminiCliProviderMisc:
         assert provider._mcp_server_names == []
         assert provider._initialized is False
 
-    def test_cleanup_removes_gemini_md(self, tmp_path):
-        """Test cleanup removes GEMINI.md file created for system prompt."""
-        gemini_md = tmp_path / "GEMINI.md"
-        gemini_md.write_text("Supervisor agent prompt")
+    def test_cleanup_removes_workspace_directory(self, tmp_path):
+        """Test cleanup removes the per-terminal workspace directory and its contents."""
+        workspace = tmp_path / "gemini-workspaces" / "term-1"
+        workspace.mkdir(parents=True)
+        (workspace / "GEMINI.md").write_text("Supervisor agent prompt")
+        # Arbitrary extra file in the workspace — cleanup should blow it all away.
+        (workspace / "stray.log").write_text("ephemeral")
 
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
-        provider._gemini_md_path = str(gemini_md)
+        provider._gemini_workspace = workspace
         provider.cleanup()
 
-        assert not gemini_md.exists()
-        assert provider._gemini_md_path is None
+        assert not workspace.exists()
+        assert provider._gemini_workspace is None
 
-    def test_cleanup_restores_backup_gemini_md(self, tmp_path):
-        """Test cleanup restores user's original GEMINI.md from backup."""
-        gemini_md = tmp_path / "GEMINI.md"
-        gemini_md.write_text("CAO injected prompt")
-        backup = tmp_path / "GEMINI.md.cao_backup"
-        backup.write_text("User's original instructions")
-
+    def test_cleanup_is_idempotent_when_workspace_missing(self, tmp_path):
+        """Cleanup must not raise when the workspace was already removed."""
         provider = GeminiCliProvider("term-1", "session-1", "window-1")
-        provider._gemini_md_path = str(gemini_md)
-        provider._gemini_md_backup_path = str(backup)
+        provider._gemini_workspace = tmp_path / "does_not_exist"
+        # Should not raise.
         provider.cleanup()
-
-        # Original restored, backup removed
-        assert gemini_md.exists()
-        assert gemini_md.read_text() == "User's original instructions"
-        assert not backup.exists()
-        assert provider._gemini_md_path is None
-        assert provider._gemini_md_backup_path is None
+        assert provider._gemini_workspace is None
 
     def test_provider_inherits_base(self):
         """Test provider inherits from BaseProvider."""
@@ -1040,8 +1179,7 @@ class TestGeminiCliProviderMisc:
         assert provider._initialized is False
         assert provider._agent_profile is None
         assert provider._mcp_server_names == []
-        assert provider._gemini_md_path is None
-        assert provider._gemini_md_backup_path is None
+        assert provider._gemini_workspace is None
         assert provider.terminal_id == "term-1"
         assert provider.session_name == "session-1"
         assert provider.window_name == "window-1"

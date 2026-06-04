@@ -1,10 +1,19 @@
 """Minimal database client with only terminal metadata."""
 
 import logging
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import Boolean, Column, DateTime, Integer, String, create_engine
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Integer,
+    String,
+    UniqueConstraint,
+    create_engine,
+)
 from sqlalchemy.orm import DeclarativeBase, declarative_base, sessionmaker
 
 from cli_agent_orchestrator.constants import DATABASE_URL, DB_DIR, DEFAULT_PROVIDER
@@ -22,14 +31,12 @@ class TerminalModel(Base):
     __tablename__ = "terminals"
 
     id = Column(String, primary_key=True)  # "abc123ef"
-    session_name = Column(String, nullable=True)  # "cao-session-name"
-    terminal_name = Column(String, nullable=True)  # "developer-abc1"
-    zellij_tab_id = Column(Integer, nullable=True)
-    zellij_pane_id = Column(Integer, nullable=True)
-    launch_working_directory = Column(String, nullable=True)
+    tmux_session = Column(String, nullable=False)  # "cao-session-name"
+    tmux_window = Column(String, nullable=False)  # "window-name"
     provider = Column(String, nullable=False)  # "q_cli", "claude_code"
     agent_profile = Column(String)  # "developer", "reviewer" (optional)
     allowed_tools = Column(String, nullable=True)  # JSON-encoded list of CAO tool names
+    shell_command = Column(String, nullable=True)  # shell process name captured before kiro launch
     last_active = Column(DateTime, default=datetime.now)
 
 
@@ -44,6 +51,56 @@ class InboxModel(Base):
     message = Column(String, nullable=False)
     status = Column(String, nullable=False)  # MessageStatus enum value
     created_at = Column(DateTime, default=datetime.now)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class MemoryMetadataModel(Base):
+    """SQLAlchemy model for memory metadata (Phase 2 U1).
+
+    SQLite is the source of truth for metadata queries; wiki markdown
+    files remain the content store. Each row corresponds to exactly one
+    wiki file on disk.
+    """
+
+    __tablename__ = "memory_metadata"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    key = Column(String, nullable=False)
+    memory_type = Column(String, nullable=False)
+    scope = Column(String, nullable=False)
+    scope_id = Column(String, nullable=True)
+    file_path = Column(String, nullable=False)
+    tags = Column(String, nullable=False, default="")
+    source_provider = Column(String, nullable=True)
+    source_terminal_id = Column(String, nullable=True)
+    token_estimate = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+    __table_args__ = (UniqueConstraint("key", "scope", "scope_id", name="uq_memory_key_scope"),)
+
+
+class ProjectAliasModel(Base):
+    """SQLAlchemy model for project identity aliases (Phase 2.5 U6).
+
+    Maps historical/alternate project identifiers (cwd hashes, manual labels)
+    to a canonical ``project_id`` so memory recall survives directory rename
+    and worktree layouts.
+    """
+
+    __tablename__ = "project_aliases"
+
+    # ``alias`` is the sole primary key: an alias maps to exactly one canonical
+    # project_id, so reverse lookups (get_project_id_by_alias) are stable. A
+    # cwd-hash first resolved via an override and later via its git remote
+    # upserts the same row rather than creating a second, ambiguous mapping.
+    alias = Column(String, primary_key=True)
+    project_id = Column(String, nullable=False, index=True)
+    kind = Column(String, nullable=False)  # "git_remote" | "cwd_hash" | "manual"
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
 
 
 class FlowModel(Base):
@@ -70,13 +127,70 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db() -> None:
     """Initialize database tables and apply schema migrations."""
+    _migrate_project_aliases_schema()
     Base.metadata.create_all(bind=engine)
-    _migrate_add_allowed_tools()
-    _migrate_terminal_runtime_columns()
+    _migrate_terminals_schema()
+    _migrate_memory_indexes()
 
 
-def _migrate_add_allowed_tools() -> None:
-    """Add allowed_tools column to terminals table if missing (schema migration)."""
+def _migrate_project_aliases_schema() -> None:
+    """Rebuild project_aliases if it predates the alias-only primary key.
+
+    The table originally used a composite PK ``(project_id, alias)``, which
+    allowed one alias to map to several project_ids and made reverse lookups
+    nondeterministic. The new schema keys on ``alias`` alone. SQLite cannot
+    alter a primary key in place, so drop and recreate. The table is an
+    opportunistic identity cache rebuilt by ``resolve_project_id`` on demand,
+    so dropping rows is safe. Runs before ``create_all`` so the fresh schema
+    is created with the new PK.
+    """
+    import sqlite3
+
+    from cli_agent_orchestrator.constants import DATABASE_FILE
+
+    try:
+        with sqlite3.connect(str(DATABASE_FILE)) as conn:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master " "WHERE type='table' AND name='project_aliases'"
+            ).fetchone()
+            if row is None:
+                return  # table doesn't exist yet — create_all builds it fresh
+            cols = conn.execute("PRAGMA table_info(project_aliases)").fetchall()
+            # PRAGMA returns rows: (cid, name, type, notnull, dflt_value, pk).
+            # In the legacy schema both project_id and alias have pk>0; in the
+            # new schema only alias does.
+            pk_cols = {c[1] for c in cols if c[5]}
+            if pk_cols != {"alias"}:
+                conn.execute("DROP TABLE project_aliases")
+                conn.commit()
+                logger.info("Migration: rebuilt project_aliases with alias-only primary key")
+    except Exception as e:
+        logger.debug(f"project_aliases migration skipped: {e}")
+
+
+def _migrate_memory_indexes() -> None:
+    """Add explicit indexes on memory_metadata for query performance."""
+    import sqlite3
+
+    from cli_agent_orchestrator.constants import DATABASE_FILE
+
+    try:
+        with sqlite3.connect(str(DATABASE_FILE)) as conn:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_scope ON memory_metadata (scope, scope_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_updated ON memory_metadata (updated_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_type ON memory_metadata (memory_type)"
+            )
+    except Exception as e:
+        logger.debug(f"Memory index migration skipped: {e}")
+
+
+def _migrate_terminals_schema() -> None:
+    """Add allowed_tools and shell_command columns to terminals table if missing (schema migration)."""
     import sqlite3
 
     from cli_agent_orchestrator.constants import DATABASE_FILE
@@ -89,153 +203,23 @@ def _migrate_add_allowed_tools() -> None:
             conn.execute("ALTER TABLE terminals ADD COLUMN allowed_tools TEXT")
             conn.commit()
             logger.info("Migration: added allowed_tools column to terminals table")
+        if "shell_command" not in columns:
+            conn.execute("ALTER TABLE terminals ADD COLUMN shell_command TEXT")
+            conn.commit()
+            logger.info("Migration: added shell_command column to terminals table")
         conn.close()
     except Exception as e:
-        logger.warning(f"Migration check for allowed_tools failed: {e}")
-
-
-def _migrate_terminal_runtime_columns() -> None:
-    """Add neutral/Zellij terminal runtime columns and backfill from old tmux columns."""
-    import sqlite3
-
-    from cli_agent_orchestrator.constants import DATABASE_FILE
-
-    try:
-        with sqlite3.connect(str(DATABASE_FILE)) as conn:
-            cursor = conn.execute("PRAGMA table_info(terminals)")
-            table_info = cursor.fetchall()
-            columns = {row[1] for row in table_info}
-            migrations = {
-                "session_name": "ALTER TABLE terminals ADD COLUMN session_name TEXT",
-                "terminal_name": "ALTER TABLE terminals ADD COLUMN terminal_name TEXT",
-                "zellij_tab_id": "ALTER TABLE terminals ADD COLUMN zellij_tab_id INTEGER",
-                "zellij_pane_id": "ALTER TABLE terminals ADD COLUMN zellij_pane_id INTEGER",
-                "launch_working_directory": (
-                    "ALTER TABLE terminals ADD COLUMN launch_working_directory TEXT"
-                ),
-            }
-            for column, statement in migrations.items():
-                if column not in columns:
-                    conn.execute(statement)
-                    logger.info("Migration: added %s column to terminals table", column)
-
-            if "tmux_session" in columns:
-                conn.execute(
-                    "UPDATE terminals SET session_name = tmux_session "
-                    "WHERE session_name IS NULL"
-                )
-            if "tmux_window" in columns:
-                conn.execute(
-                    "UPDATE terminals SET terminal_name = tmux_window "
-                    "WHERE terminal_name IS NULL"
-                )
-            _rebuild_terminals_table_if_legacy_not_null(conn)
-            conn.commit()
-    except Exception as e:
-        logger.warning(f"Migration check for terminal runtime columns failed: {e}")
-
-
-def _rebuild_terminals_table_if_legacy_not_null(conn: Any) -> None:
-    """Relax old tmux column NOT NULL constraints left by pre-Zellij databases."""
-    table_info = conn.execute("PRAGMA table_info(terminals)").fetchall()
-    columns = {row[1] for row in table_info}
-    legacy_not_null = any(
-        row[1] in {"tmux_session", "tmux_window"} and row[3] == 1 for row in table_info
-    )
-    if not legacy_not_null:
-        return
-
-    include_tmux_session = "tmux_session" in columns
-    include_tmux_window = "tmux_window" in columns
-    legacy_columns_sql = []
-    if include_tmux_session:
-        legacy_columns_sql.append("tmux_session TEXT")
-    if include_tmux_window:
-        legacy_columns_sql.append("tmux_window TEXT")
-
-    conn.execute("ALTER TABLE terminals RENAME TO terminals_legacy_runtime_migration")
-    conn.execute(
-        f"""
-        CREATE TABLE terminals (
-            id TEXT PRIMARY KEY,
-            session_name TEXT,
-            terminal_name TEXT,
-            zellij_tab_id INTEGER,
-            zellij_pane_id INTEGER,
-            launch_working_directory TEXT,
-            provider TEXT NOT NULL,
-            agent_profile TEXT,
-            allowed_tools TEXT,
-            last_active DATETIME
-            {"," if legacy_columns_sql else ""}
-            {", ".join(legacy_columns_sql)}
-        )
-        """
-    )
-
-    def value_for(column: str, fallback: str = "NULL") -> str:
-        return column if column in columns else fallback
-
-    session_value = value_for("session_name", value_for("tmux_session"))
-    if "session_name" in columns and "tmux_session" in columns:
-        session_value = "COALESCE(session_name, tmux_session)"
-
-    terminal_value = value_for("terminal_name", value_for("tmux_window"))
-    if "terminal_name" in columns and "tmux_window" in columns:
-        terminal_value = "COALESCE(terminal_name, tmux_window)"
-
-    insert_columns = [
-        "id",
-        "session_name",
-        "terminal_name",
-        "zellij_tab_id",
-        "zellij_pane_id",
-        "launch_working_directory",
-        "provider",
-        "agent_profile",
-        "allowed_tools",
-        "last_active",
-    ]
-    select_values = [
-        "id",
-        session_value,
-        terminal_value,
-        value_for("zellij_tab_id"),
-        value_for("zellij_pane_id"),
-        value_for("launch_working_directory"),
-        "provider",
-        value_for("agent_profile"),
-        value_for("allowed_tools"),
-        value_for("last_active", "CURRENT_TIMESTAMP"),
-    ]
-    if include_tmux_session:
-        insert_columns.append("tmux_session")
-        select_values.append("tmux_session")
-    if include_tmux_window:
-        insert_columns.append("tmux_window")
-        select_values.append("tmux_window")
-
-    conn.execute(
-        f"""
-        INSERT INTO terminals ({", ".join(insert_columns)})
-        SELECT {", ".join(select_values)}
-        FROM terminals_legacy_runtime_migration
-        """
-    )
-    conn.execute("DROP TABLE terminals_legacy_runtime_migration")
-    logger.info("Migration: relaxed legacy tmux NOT NULL constraints on terminals table")
+        logger.warning(f"Migration check for terminals schema failed: {e}")
 
 
 def create_terminal(
     terminal_id: str,
-    session_name: str,
-    terminal_name: str,
+    tmux_session: str,
+    tmux_window: str,
     provider: str,
     agent_profile: Optional[str] = None,
     allowed_tools: Optional[List[str]] = None,
-    zellij_tab_id: Optional[int] = None,
-    zellij_pane_id: Optional[int] = None,
-    launch_working_directory: Optional[str] = None,
+    shell_command: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create terminal metadata record."""
     import json as _json
@@ -243,27 +227,23 @@ def create_terminal(
     with SessionLocal() as db:
         terminal = TerminalModel(
             id=terminal_id,
-            session_name=session_name,
-            terminal_name=terminal_name,
-            zellij_tab_id=zellij_tab_id,
-            zellij_pane_id=zellij_pane_id,
-            launch_working_directory=launch_working_directory,
+            tmux_session=tmux_session,
+            tmux_window=tmux_window,
             provider=provider,
             agent_profile=agent_profile,
             allowed_tools=_json.dumps(allowed_tools) if allowed_tools else None,
+            shell_command=shell_command,
         )
         db.add(terminal)
         db.commit()
         return {
             "id": terminal.id,
-            "session_name": terminal.session_name,
-            "name": terminal.terminal_name,
-            "zellij_tab_id": terminal.zellij_tab_id,
-            "zellij_pane_id": terminal.zellij_pane_id,
-            "launch_working_directory": terminal.launch_working_directory,
+            "tmux_session": terminal.tmux_session,
+            "tmux_window": terminal.tmux_window,
             "provider": terminal.provider,
             "agent_profile": terminal.agent_profile,
             "allowed_tools": allowed_tools,
+            "shell_command": terminal.shell_command,
         }
 
 
@@ -277,36 +257,30 @@ def get_terminal_metadata(terminal_id: str) -> Optional[Dict[str, Any]]:
             logger.warning(f"Terminal metadata not found for terminal_id: {terminal_id}")
             return None
         logger.debug(
-            f"Retrieved terminal metadata for {terminal_id}: provider={terminal.provider}, session={terminal.session_name}"
+            f"Retrieved terminal metadata for {terminal_id}: provider={terminal.provider}, session={terminal.tmux_session}"
         )
         allowed_tools = _json.loads(terminal.allowed_tools) if terminal.allowed_tools else None
         return {
             "id": terminal.id,
-            "session_name": terminal.session_name,
-            "terminal_name": terminal.terminal_name,
-            "name": terminal.terminal_name,
-            "zellij_tab_id": terminal.zellij_tab_id,
-            "zellij_pane_id": terminal.zellij_pane_id,
-            "launch_working_directory": terminal.launch_working_directory,
+            "tmux_session": terminal.tmux_session,
+            "tmux_window": terminal.tmux_window,
             "provider": terminal.provider,
             "agent_profile": terminal.agent_profile,
             "allowed_tools": allowed_tools,
+            "shell_command": terminal.shell_command,
             "last_active": terminal.last_active,
         }
 
 
-def list_terminals_by_session(session_name: str) -> List[Dict[str, Any]]:
-    """List all terminals in a session."""
+def list_terminals_by_session(tmux_session: str) -> List[Dict[str, Any]]:
+    """List all terminals in a tmux session."""
     with SessionLocal() as db:
-        terminals = db.query(TerminalModel).filter(TerminalModel.session_name == session_name).all()
+        terminals = db.query(TerminalModel).filter(TerminalModel.tmux_session == tmux_session).all()
         return [
             {
                 "id": t.id,
-                "session_name": t.session_name,
-                "name": t.terminal_name,
-                "zellij_tab_id": t.zellij_tab_id,
-                "zellij_pane_id": t.zellij_pane_id,
-                "launch_working_directory": t.launch_working_directory,
+                "tmux_session": t.tmux_session,
+                "tmux_window": t.tmux_window,
                 "provider": t.provider,
                 "agent_profile": t.agent_profile,
                 "last_active": t.last_active,
@@ -326,6 +300,17 @@ def update_last_active(terminal_id: str) -> bool:
         return False
 
 
+def update_terminal_shell_command(terminal_id: str, shell_command: str) -> bool:
+    """Update the shell_command baseline for a terminal."""
+    with SessionLocal() as db:
+        terminal = db.query(TerminalModel).filter(TerminalModel.id == terminal_id).first()
+        if terminal:
+            terminal.shell_command = shell_command
+            db.commit()
+            return True
+        return False
+
+
 def list_all_terminals() -> List[Dict[str, Any]]:
     """List all terminals."""
     with SessionLocal() as db:
@@ -333,11 +318,8 @@ def list_all_terminals() -> List[Dict[str, Any]]:
         return [
             {
                 "id": t.id,
-                "session_name": t.session_name,
-                "name": t.terminal_name,
-                "zellij_tab_id": t.zellij_tab_id,
-                "zellij_pane_id": t.zellij_pane_id,
-                "launch_working_directory": t.launch_working_directory,
+                "tmux_session": t.tmux_session,
+                "tmux_window": t.tmux_window,
                 "provider": t.provider,
                 "agent_profile": t.agent_profile,
                 "last_active": t.last_active,
@@ -370,11 +352,11 @@ def delete_terminal(terminal_id: str) -> bool:
         return deleted > 0
 
 
-def delete_terminals_by_session(session_name: str) -> int:
+def delete_terminals_by_session(tmux_session: str) -> int:
     """Delete all terminals in a session."""
     with SessionLocal() as db:
         deleted = (
-            db.query(TerminalModel).filter(TerminalModel.session_name == session_name).delete()
+            db.query(TerminalModel).filter(TerminalModel.tmux_session == tmux_session).delete()
         )
         db.commit()
         return deleted
@@ -439,6 +421,61 @@ def get_inbox_messages(
             )
             for msg in messages
         ]
+
+
+def record_project_alias(project_id: str, alias: str, kind: str) -> None:
+    """Idempotently record a project_id ↔ alias mapping (Phase 2.5 U6).
+
+    Used opportunistically by ``resolve_project_id`` to track historical
+    cwd-hash and git-remote-url aliases for a canonical project_id. Best-effort
+    only — DB errors are swallowed so identity resolution is never blocked.
+    """
+    if not project_id or not alias or project_id == alias:
+        return
+    try:
+        with SessionLocal() as db:
+            # Upsert by alias (the primary key). If the same alias was already
+            # mapped — e.g. recorded against an override id, then re-resolved
+            # via git remote — repoint it to the current canonical project_id
+            # so reverse lookups stay deterministic instead of duplicating.
+            existing = db.query(ProjectAliasModel).filter(ProjectAliasModel.alias == alias).first()
+            if existing is None:
+                db.add(ProjectAliasModel(project_id=project_id, alias=alias, kind=kind))
+                db.commit()
+            elif existing.project_id != project_id or existing.kind != kind:
+                existing.project_id = project_id
+                existing.kind = kind
+                db.commit()
+    except Exception as e:
+        logger.debug(f"record_project_alias failed (non-fatal): {e}")
+
+
+def get_project_id_by_alias(alias: str) -> Optional[str]:
+    """Return the canonical ``project_id`` for an alias, or None if unknown."""
+    if not alias:
+        return None
+    try:
+        with SessionLocal() as db:
+            row = db.query(ProjectAliasModel).filter(ProjectAliasModel.alias == alias).first()
+            return row.project_id if row else None
+    except Exception as e:
+        logger.debug(f"get_project_id_by_alias failed (non-fatal): {e}")
+        return None
+
+
+def list_aliases_for_project(project_id: str) -> List[Dict[str, Any]]:
+    """List all aliases recorded for a canonical ``project_id``."""
+    if not project_id:
+        return []
+    try:
+        with SessionLocal() as db:
+            rows = (
+                db.query(ProjectAliasModel).filter(ProjectAliasModel.project_id == project_id).all()
+            )
+            return [{"project_id": r.project_id, "alias": r.alias, "kind": r.kind} for r in rows]
+    except Exception as e:
+        logger.debug(f"list_aliases_for_project failed (non-fatal): {e}")
+        return []
 
 
 def update_message_status(message_id: int, status: MessageStatus) -> bool:

@@ -6,7 +6,7 @@ import shlex
 import time
 from typing import Optional
 
-from cli_agent_orchestrator.clients.zellij import zellij_client
+from cli_agent_orchestrator.clients.tmux import tmux_client
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import BaseProvider
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
@@ -22,12 +22,12 @@ IDLE_PROMPT_PATTERN = r"(?:❯|›|codex>)"
 # so we can't anchor to \Z. Instead, check the last few lines where the prompt
 # and status bar appear.
 IDLE_PROMPT_TAIL_LINES = 5
-# The idle prompt character ❯ (U+276F) is rendered on-screen by dump-screen
-# but is NOT always written to the raw log stream from subscribe. Instead,
+# The idle prompt character ❯ (U+276F) is rendered on-screen by capture-pane
+# but is NOT written to the raw output stream captured by pipe-pane.  Instead,
 # the TUI footer text "? for shortcuts" is reliably present whenever the TUI
 # is active.  This is intentionally permissive — _has_idle_pattern() is a
 # lightweight pre-check; the real status decision is made by get_status()
-# which uses dump-screen (rendered screen).
+# which uses capture-pane (rendered screen).
 IDLE_PROMPT_PATTERN_LOG = r"\? for shortcuts"
 # Match assistant response start: "assistant:/codex:/agent:" (label style from synthetic
 # test fixtures) or "•" bullet point (real Codex interactive output format).
@@ -130,85 +130,94 @@ class CodexProvider(BaseProvider):
     def _build_codex_command(self) -> str:
         """Build Codex command with agent profile if provided.
 
-        Returns a properly escaped shell command string.
+        Returns properly escaped shell command string that can be safely sent via tmux.
         Uses codex's -c developer_instructions flag to inject agent system prompts.
         """
-        # --yolo (alias for --dangerously-bypass-approvals-and-sandbox):
-        # bypass approval prompts and sandboxing. CAO agents run in
-        # non-interactive terminal sessions where interactive approval prompts
-        # block handoff/assign flows. This mirrors Claude Code's
-        # --dangerously-skip-permissions and Gemini CLI's --yolo flags.
-        command_parts = ["codex", "--yolo", "--no-alt-screen", "--disable", "shell_snapshot"]
+        # --yolo (alias for --dangerously-bypass-approvals-and-sandbox)
+        # is the default because CAO runs codex non-interactively in tmux
+        # where approval prompts would block handoff/assign. Profiles can
+        # opt out via `codexProfile` (names a [profiles.<name>] block in
+        # ~/.codex/config.toml), unless unrestricted allowed tools are enabled.
+        # In practice, allowed_tools containing "*" is treated as yolo mode
+        # and overrides codexProfile in the same way as an explicit yolo launch.
+        yolo = bool(self._allowed_tools and "*" in self._allowed_tools)
 
+        profile = None
         if self._agent_profile is not None:
             try:
                 profile = load_agent_profile(self._agent_profile)
-
-                if profile.model:
-                    command_parts.extend(["--model", profile.model])
-
-                system_prompt = profile.system_prompt if profile.system_prompt is not None else ""
-                system_prompt = self._apply_skill_prompt(system_prompt)
-
-                # Prepend security constraints for soft enforcement (Codex has no
-                # native tool restriction mechanism). Only applied when tool
-                # restrictions are active (not unrestricted "*").
-                if self._allowed_tools and "*" not in self._allowed_tools:
-                    from cli_agent_orchestrator.constants import SECURITY_PROMPT
-
-                    tools_list = ", ".join(self._allowed_tools)
-                    tool_constraint = f"\nYou only have access to these tools: {tools_list}\n"
-                    system_prompt = SECURITY_PROMPT + tool_constraint + system_prompt
-
-                if system_prompt:
-                    # Codex accepts developer_instructions via -c config override.
-                    # This is injected as a developer role message before AGENTS.md content.
-                    # Escape backslashes, double quotes, and newlines for TOML basic string.
-                    # Newlines must become literal \n to prevent terminal input from
-                    # splitting the command across multiple lines.
-                    escaped_prompt = (
-                        system_prompt.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-                    )
-                    command_parts.extend(["-c", f'developer_instructions="{escaped_prompt}"'])
-
-                # Add MCP servers via -c config overrides (per-session, no global config changes).
-                # Each server field is set via dotted path: mcp_servers.<name>.<field>=<value>
-                if profile.mcpServers:
-                    for server_name, server_config in profile.mcpServers.items():
-                        prefix = f"mcp_servers.{server_name}"
-                        if isinstance(server_config, dict):
-                            cfg = server_config
-                        else:
-                            cfg = server_config.model_dump(exclude_none=True)
-                        if "command" in cfg:
-                            command_parts.extend(["-c", f'{prefix}.command="{cfg["command"]}"'])
-                        if "args" in cfg:
-                            args_toml = "[" + ", ".join(f'"{a}"' for a in cfg["args"]) + "]"
-                            command_parts.extend(["-c", f"{prefix}.args={args_toml}"])
-                        if "env" in cfg and cfg["env"]:
-                            for env_key, env_val in cfg["env"].items():
-                                command_parts.extend(["-c", f'{prefix}.env.{env_key}="{env_val}"'])
-                        # Forward CAO_TERMINAL_ID so MCP servers (e.g. cao-mcp-server)
-                        # can identify the current session for handoff/assign operations.
-                        # Codex does not forward env vars to MCP subprocesses by default;
-                        # env_vars lists names to inherit from the parent shell environment.
-                        env_vars = cfg.get("env_vars", [])
-                        if "CAO_TERMINAL_ID" not in env_vars:
-                            env_vars = list(env_vars) + ["CAO_TERMINAL_ID"]
-                        env_vars_toml = "[" + ", ".join(f'"{v}"' for v in env_vars) + "]"
-                        command_parts.extend(["-c", f"{prefix}.env_vars={env_vars_toml}"])
-                        # Set a generous tool timeout for MCP calls like handoff, which
-                        # create a new terminal, initialize the provider, send a message,
-                        # wait for the agent to complete, and extract the output.
-                        # Codex defaults to 60s which is too short for multi-step operations.
-                        # Value MUST be a TOML float (600.0, not 600) because Codex
-                        # deserializes tool_timeout_sec via Option<f64>; a TOML integer
-                        # is silently rejected and falls back to the 60s default.
-                        if "tool_timeout_sec" not in cfg:
-                            command_parts.extend(["-c", f"{prefix}.tool_timeout_sec=600.0"])
-
             except Exception as e:
                 raise ProviderError(f"Failed to load agent profile '{self._agent_profile}': {e}")
+
+        if profile and profile.codexProfile and not yolo:
+            command_parts = ["codex", "--profile", profile.codexProfile]
+        else:
+            command_parts = ["codex", "--yolo"]
+        command_parts.extend(["--no-alt-screen", "--disable", "shell_snapshot"])
+
+        if profile is not None:
+            if profile.model:
+                command_parts.extend(["--model", profile.model])
+
+            system_prompt = profile.system_prompt if profile.system_prompt is not None else ""
+            system_prompt = self._apply_skill_prompt(system_prompt)
+
+            # Prepend security constraints for soft enforcement (Codex has no
+            # native tool restriction mechanism). Only applied when tool
+            # restrictions are active (not unrestricted "*").
+            if self._allowed_tools and "*" not in self._allowed_tools:
+                from cli_agent_orchestrator.constants import SECURITY_PROMPT
+
+                tools_list = ", ".join(self._allowed_tools)
+                tool_constraint = f"\nYou only have access to these tools: {tools_list}\n"
+                system_prompt = SECURITY_PROMPT + tool_constraint + system_prompt
+
+            if system_prompt:
+                # Codex accepts developer_instructions via -c config override.
+                # This is injected as a developer role message before AGENTS.md content.
+                # Escape backslashes, double quotes, and newlines for TOML basic string.
+                # Newlines must become literal \n to prevent tmux send_keys from
+                # splitting the command across multiple lines.
+                escaped_prompt = (
+                    system_prompt.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+                )
+                command_parts.extend(["-c", f'developer_instructions="{escaped_prompt}"'])
+
+            # Add MCP servers via -c config overrides (per-session, no global config changes).
+            # Each server field is set via dotted path: mcp_servers.<name>.<field>=<value>
+            if profile.mcpServers:
+                for server_name, server_config in profile.mcpServers.items():
+                    prefix = f"mcp_servers.{server_name}"
+                    if isinstance(server_config, dict):
+                        cfg = server_config
+                    else:
+                        cfg = server_config.model_dump(exclude_none=True)
+                    if "command" in cfg:
+                        command_parts.extend(["-c", f'{prefix}.command="{cfg["command"]}"'])
+                    if "args" in cfg:
+                        args_toml = "[" + ", ".join(f'"{a}"' for a in cfg["args"]) + "]"
+                        command_parts.extend(["-c", f"{prefix}.args={args_toml}"])
+                    if "env" in cfg and cfg["env"]:
+                        for env_key, env_val in cfg["env"].items():
+                            command_parts.extend(["-c", f'{prefix}.env.{env_key}="{env_val}"'])
+                    # Forward CAO_TERMINAL_ID so MCP servers (e.g. cao-mcp-server)
+                    # can identify the current session for handoff/assign operations.
+                    # Codex does not forward env vars to MCP subprocesses by default;
+                    # env_vars lists names to inherit from the parent shell environment.
+                    env_vars = cfg.get("env_vars", [])
+                    if "CAO_TERMINAL_ID" not in env_vars:
+                        env_vars = list(env_vars) + ["CAO_TERMINAL_ID"]
+                    env_vars_toml = "[" + ", ".join(f'"{v}"' for v in env_vars) + "]"
+                    command_parts.extend(["-c", f"{prefix}.env_vars={env_vars_toml}"])
+                    # Set a generous tool timeout for MCP calls like handoff, which
+                    # create a new terminal, initialize the provider, send a message,
+                    # wait for the agent to complete, and extract the output.
+                    # Codex defaults to 60s which is too short for multi-step operations.
+                    # Value MUST be a TOML float (600.0, not 600) because Codex
+                    # deserializes tool_timeout_sec via Option<f64>; a TOML integer
+                    # is silently rejected and falls back to the 60s default.
+                    if "tool_timeout_sec" not in cfg:
+                        command_parts.extend(["-c", f"{prefix}.tool_timeout_sec=600.0"])
 
         return shlex.join(command_parts)
 
@@ -222,7 +231,7 @@ class CodexProvider(BaseProvider):
         """
         start_time = time.time()
         while time.time() - start_time < timeout:
-            output = zellij_client.get_history(self.session_name, self.window_name)
+            output = tmux_client.get_history(self.session_name, self.window_name)
             if not output:
                 time.sleep(1.0)
                 continue
@@ -232,7 +241,11 @@ class CodexProvider(BaseProvider):
 
             if re.search(TRUST_PROMPT_PATTERN, clean_output):
                 logger.info("Codex workspace trust prompt detected, auto-accepting")
-                zellij_client.send_special_key(self.session_name, self.window_name, "Enter")
+                session = tmux_client.server.sessions.get(session_name=self.session_name)
+                window = session.windows.get(window_name=self.window_name)
+                pane = window.active_pane
+                if pane:
+                    pane.send_keys("", enter=True)
                 return
 
             # Check if Codex has fully started (welcome banner visible)
@@ -245,22 +258,22 @@ class CodexProvider(BaseProvider):
 
     def initialize(self) -> bool:
         """Initialize Codex provider by starting codex command."""
-        if not wait_for_shell(zellij_client, self.session_name, self.window_name, timeout=10.0):
+        if not wait_for_shell(tmux_client, self.session_name, self.window_name, timeout=10.0):
             raise TimeoutError("Shell initialization timed out after 10 seconds")
 
         # Send a warm-up command before launching codex.
-        # Codex exits immediately in freshly-created terminal sessions where the shell
+        # Codex exits immediately in freshly-created tmux sessions where the shell
         # has not yet processed a full interactive command cycle.
-        zellij_client.send_keys(self.session_name, self.window_name, "echo ready")
+        tmux_client.send_keys(self.session_name, self.window_name, "echo ready")
         time.sleep(2.0)
 
         # Build command with flags and agent profile (developer_instructions).
         # --no-alt-screen: run in inline mode so output stays in normal scrollback,
-        #   keeping output available in scrollback capture.
-        # --disable shell_snapshot: avoid TTY input conflicts (SIGTTIN)
+        #   making tmux capture-pane reliable.
+        # --disable shell_snapshot: avoid TTY input conflicts (SIGTTIN) in tmux
         #   caused by the shell_snapshot subprocess inheriting stdin.
         command = self._build_codex_command()
-        zellij_client.send_keys(self.session_name, self.window_name, command)
+        tmux_client.send_keys(self.session_name, self.window_name, command)
 
         # Handle workspace trust prompt if it appears (new/untrusted directories)
         self._handle_trust_prompt(timeout=20.0)
@@ -278,7 +291,7 @@ class CodexProvider(BaseProvider):
 
     def get_status(self, tail_lines: Optional[int] = None) -> TerminalStatus:
         """Get Codex status by analyzing terminal output."""
-        output = zellij_client.get_history(self.session_name, self.window_name, tail_lines=tail_lines)
+        output = tmux_client.get_history(self.session_name, self.window_name, tail_lines=tail_lines)
 
         if not output:
             return TerminalStatus.ERROR

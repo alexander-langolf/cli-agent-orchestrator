@@ -42,6 +42,7 @@ export interface TerminalMeta {
   launch_working_directory: string | null
   provider: string
   agent_profile: string | null
+  created_at: string | null
   last_active: string | null
 }
 

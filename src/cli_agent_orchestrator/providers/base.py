@@ -65,6 +65,20 @@ class BaseProvider(ABC):
         self._status = TerminalStatus.IDLE
         self._allowed_tools: Optional[List[str]] = allowed_tools
         self._skill_prompt: Optional[str] = skill_prompt
+        self._shell_baseline: Optional[str] = None
+
+    @property
+    def shell_baseline(self) -> Optional[str]:
+        """Shell process name captured before the CLI tool launched.
+
+        Used by providers to detect when the CLI tool has exited and the
+        shell is showing again (current pane command matches this baseline).
+        """
+        return self._shell_baseline
+
+    @shell_baseline.setter
+    def shell_baseline(self, value: Optional[str]) -> None:
+        self._shell_baseline = value
 
     @property
     def status(self) -> TerminalStatus:
@@ -116,6 +130,19 @@ class BaseProvider(ABC):
             str: Pattern to search for in log file tail
         """
         pass
+
+    @property
+    def accepts_input_while_processing(self) -> bool:
+        """Whether this provider buffers pasted input during PROCESSING for next-turn pickup.
+
+        When True AND CAO_EAGER_INBOX_DELIVERY is enabled, the inbox service will
+        deliver messages to this terminal even when its status is PROCESSING or
+        WAITING_USER_ANSWER, rather than waiting for IDLE/COMPLETED.
+
+        Override in subclasses for providers whose TUI buffers input at all times
+        (e.g., Claude Code's Ink renderer).
+        """
+        return False
 
     @property
     def extraction_retries(self) -> int:

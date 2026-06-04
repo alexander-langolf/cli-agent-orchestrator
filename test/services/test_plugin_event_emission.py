@@ -1,6 +1,5 @@
 """Tests for plugin event emission from service-layer operations."""
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -66,28 +65,28 @@ class TestSessionPluginEvents:
     def test_create_session_does_not_dispatch_on_failure(self, mock_create_terminal):
         """Session creation failures must not emit plugin events."""
         registry = _registry_mock()
-        mock_create_terminal.side_effect = RuntimeError("zellij failed")
+        mock_create_terminal.side_effect = RuntimeError("tmux failed")
 
-        with pytest.raises(RuntimeError, match="zellij failed"):
+        with pytest.raises(RuntimeError, match="tmux failed"):
             create_session(provider="kiro_cli", agent_profile="developer", registry=registry)
 
         registry.dispatch.assert_not_awaited()
 
     @patch("cli_agent_orchestrator.services.session_service.delete_terminals_by_session")
     @patch("cli_agent_orchestrator.services.session_service.list_terminals_by_session")
-    @patch("cli_agent_orchestrator.services.session_service.zellij_client")
+    @patch("cli_agent_orchestrator.services.session_service.tmux_client")
     def test_delete_session_dispatches_post_kill_session_event_after_cleanup(
-        self, mock_zellij, mock_list_terminals, mock_delete_terminals
+        self, mock_tmux, mock_list_terminals, mock_delete_terminals
     ):
-        """Session kill should emit after the Zellij kill and DB cleanup succeed."""
+        """Session kill should emit after the tmux kill and DB cleanup succeed."""
         registry = _registry_mock()
         call_order: list[str] = []
 
         async def record_dispatch(*_args):
             call_order.append("dispatch")
 
-        mock_zellij.session_exists.return_value = True
-        mock_zellij.kill_session.side_effect = lambda *_: call_order.append("kill_session")
+        mock_tmux.session_exists.return_value = True
+        mock_tmux.kill_session.side_effect = lambda *_: call_order.append("kill_session")
         mock_list_terminals.return_value = []
         mock_delete_terminals.side_effect = lambda *_: call_order.append("delete_terminals")
         registry.dispatch.side_effect = record_dispatch
@@ -102,11 +101,11 @@ class TestSessionPluginEvents:
         assert event.session_id == "cao-demo"
         assert event.session_name == "cao-demo"
 
-    @patch("cli_agent_orchestrator.services.session_service.zellij_client")
-    def test_delete_session_does_not_dispatch_on_failure(self, mock_zellij):
+    @patch("cli_agent_orchestrator.services.session_service.tmux_client")
+    def test_delete_session_does_not_dispatch_on_failure(self, mock_tmux):
         """Missing sessions should raise without emitting events."""
         registry = _registry_mock()
-        mock_zellij.session_exists.return_value = False
+        mock_tmux.session_exists.return_value = False
 
         with pytest.raises(ValueError, match="Session 'cao-missing' not found"):
             delete_session("cao-missing", registry=registry)
@@ -122,14 +121,14 @@ class TestTerminalPluginEvents:
     @patch("cli_agent_orchestrator.services.terminal_service.load_agent_profile")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_terminal_id")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_window_name")
-    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
     @patch("cli_agent_orchestrator.services.terminal_service.db_create_terminal")
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
     def test_create_terminal_dispatches_post_create_terminal_event_after_setup(
         self,
         mock_provider_manager,
         mock_db_create_terminal,
-        mock_zellij,
+        mock_tmux,
         mock_generate_window_name,
         mock_generate_terminal_id,
         mock_load_agent_profile,
@@ -145,14 +144,10 @@ class TestTerminalPluginEvents:
 
         mock_generate_terminal_id.return_value = "abcd1234"
         mock_generate_window_name.return_value = "developer-abcd"
-        mock_zellij.session_exists.return_value = False
-        mock_zellij.create_session.return_value = SimpleNamespace(
-            name="developer-abcd",
-            tab_id=0,
-            pane_id=7,
-            launch_working_directory="/tmp/project",
+        mock_tmux.session_exists.return_value = False
+        mock_db_create_terminal.side_effect = lambda *_args, **_kwargs: call_order.append(
+            "db_create"
         )
-        mock_db_create_terminal.side_effect = lambda *_, **__: call_order.append("db_create")
         mock_load_agent_profile.return_value = AgentProfile(name="developer", description="Dev")
 
         provider = MagicMock()
@@ -161,9 +156,7 @@ class TestTerminalPluginEvents:
 
         log_path = MagicMock()
         mock_log_dir.__truediv__.return_value = log_path
-        mock_zellij.start_log_subscription.side_effect = lambda *_: call_order.append(
-            "start_log_subscription"
-        )
+        mock_tmux.pipe_pane.side_effect = lambda *_: call_order.append("pipe_pane")
         registry.dispatch.side_effect = record_dispatch
 
         terminal = create_terminal(
@@ -176,7 +169,7 @@ class TestTerminalPluginEvents:
         )
 
         assert terminal.id == "abcd1234"
-        assert call_order == ["db_create", "provider_initialize", "start_log_subscription", "dispatch"]
+        assert call_order == ["db_create", "provider_initialize", "pipe_pane", "dispatch"]
         event_type, event = registry.dispatch.await_args.args
         assert event_type == "post_create_terminal"
         assert isinstance(event, PostCreateTerminalEvent)
@@ -190,14 +183,14 @@ class TestTerminalPluginEvents:
     @patch("cli_agent_orchestrator.services.terminal_service.load_agent_profile")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_terminal_id")
     @patch("cli_agent_orchestrator.services.terminal_service.generate_window_name")
-    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
     @patch("cli_agent_orchestrator.services.terminal_service.db_create_terminal")
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
     def test_create_terminal_does_not_dispatch_on_failure(
         self,
         mock_provider_manager,
         mock_db_create_terminal,
-        mock_zellij,
+        mock_tmux,
         mock_generate_window_name,
         mock_generate_terminal_id,
         mock_load_agent_profile,
@@ -208,13 +201,7 @@ class TestTerminalPluginEvents:
         registry = _registry_mock()
         mock_generate_terminal_id.return_value = "abcd1234"
         mock_generate_window_name.return_value = "developer-abcd"
-        mock_zellij.session_exists.return_value = False
-        mock_zellij.create_session.return_value = SimpleNamespace(
-            name="developer-abcd",
-            tab_id=0,
-            pane_id=7,
-            launch_working_directory="/tmp/project",
-        )
+        mock_tmux.session_exists.return_value = False
         mock_load_agent_profile.return_value = AgentProfile(name="developer", description="Dev")
 
         provider = MagicMock()
@@ -236,10 +223,10 @@ class TestTerminalPluginEvents:
 
     @patch("cli_agent_orchestrator.services.terminal_service.db_delete_terminal", return_value=True)
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
-    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
     @patch("cli_agent_orchestrator.services.terminal_service.get_terminal_metadata")
     def test_delete_terminal_dispatches_post_kill_terminal_event_after_delete(
-        self, mock_get_metadata, mock_zellij, mock_provider_manager, mock_db_delete_terminal
+        self, mock_get_metadata, mock_tmux, mock_provider_manager, mock_db_delete_terminal
     ):
         """Terminal kill should emit only after deletion succeeds."""
         registry = _registry_mock()
@@ -249,9 +236,8 @@ class TestTerminalPluginEvents:
             call_order.append("dispatch")
 
         mock_get_metadata.return_value = {
-            "session_name": "cao-demo",
-            "terminal_name": "developer-abcd",
-            "zellij_tab_id": 0,
+            "tmux_session": "cao-demo",
+            "tmux_window": "developer-abcd",
             "agent_profile": "developer",
         }
         mock_provider_manager.cleanup_provider.side_effect = lambda *_: call_order.append("cleanup")
@@ -271,17 +257,16 @@ class TestTerminalPluginEvents:
 
     @patch("cli_agent_orchestrator.services.terminal_service.db_delete_terminal")
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
-    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
     @patch("cli_agent_orchestrator.services.terminal_service.get_terminal_metadata")
     def test_delete_terminal_does_not_dispatch_on_failure(
-        self, mock_get_metadata, mock_zellij, mock_provider_manager, mock_db_delete_terminal
+        self, mock_get_metadata, mock_tmux, mock_provider_manager, mock_db_delete_terminal
     ):
         """Deletion failures must not emit post_kill_terminal."""
         registry = _registry_mock()
         mock_get_metadata.return_value = {
-            "session_name": "cao-demo",
-            "terminal_name": "developer-abcd",
-            "zellij_tab_id": 0,
+            "tmux_session": "cao-demo",
+            "tmux_window": "developer-abcd",
             "agent_profile": "developer",
         }
         mock_db_delete_terminal.side_effect = RuntimeError("db delete failed")
@@ -297,14 +282,14 @@ class TestMessagePluginEvents:
 
     @pytest.mark.parametrize("orchestration_type", ["send_message", "assign", "handoff"])
     @patch("cli_agent_orchestrator.services.terminal_service.update_last_active")
-    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
     @patch("cli_agent_orchestrator.services.terminal_service.get_terminal_metadata")
     def test_send_input_dispatches_post_send_message_event_for_each_orchestration_mode(
         self,
         mock_get_metadata,
         mock_provider_manager,
-        mock_zellij,
+        mock_tmux,
         mock_update_last_active,
         orchestration_type,
     ):
@@ -316,14 +301,14 @@ class TestMessagePluginEvents:
             call_order.append("dispatch")
 
         mock_get_metadata.return_value = {
-            "session_name": "cao-demo",
-            "terminal_name": "developer-abcd",
+            "tmux_session": "cao-demo",
+            "tmux_window": "developer-abcd",
         }
         provider = MagicMock()
         provider.paste_enter_count = 2
         provider.mark_input_received.side_effect = lambda: call_order.append("mark_input_received")
         mock_provider_manager.get_provider.return_value = provider
-        mock_zellij.send_keys.side_effect = lambda *_args, **_kwargs: call_order.append("send_keys")
+        mock_tmux.send_keys.side_effect = lambda *_args, **_kwargs: call_order.append("send_keys")
         mock_update_last_active.side_effect = lambda *_: call_order.append("update_last_active")
         registry.dispatch.side_effect = record_dispatch
 
@@ -346,22 +331,22 @@ class TestMessagePluginEvents:
         assert event.message == "Hello from supervisor"
         assert event.orchestration_type == orchestration_type
 
-    @patch("cli_agent_orchestrator.services.terminal_service.zellij_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
     @patch("cli_agent_orchestrator.services.terminal_service.get_terminal_metadata")
     def test_send_input_does_not_dispatch_on_failure(
-        self, mock_get_metadata, mock_provider_manager, mock_zellij
+        self, mock_get_metadata, mock_provider_manager, mock_tmux
     ):
         """Message delivery failures must not emit post_send_message."""
         registry = _registry_mock()
         mock_get_metadata.return_value = {
-            "session_name": "cao-demo",
-            "terminal_name": "developer-abcd",
+            "tmux_session": "cao-demo",
+            "tmux_window": "developer-abcd",
         }
         provider = MagicMock()
         provider.paste_enter_count = 1
         mock_provider_manager.get_provider.return_value = provider
-        mock_zellij.send_keys.side_effect = RuntimeError("send failed")
+        mock_tmux.send_keys.side_effect = RuntimeError("send failed")
 
         with pytest.raises(RuntimeError, match="send failed"):
             send_input(

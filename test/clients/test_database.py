@@ -1,6 +1,5 @@
 """Tests for the database client."""
 
-import sqlite3
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -33,8 +32,8 @@ from cli_agent_orchestrator.clients.database import (
     update_flow_run_times,
     update_last_active,
     update_message_status,
+    update_terminal_shell_command,
 )
-import cli_agent_orchestrator.clients.database as database
 from cli_agent_orchestrator.models.inbox import MessageStatus
 
 
@@ -58,23 +57,9 @@ class TestTerminalOperations:
         mock_session.__exit__ = MagicMock(return_value=False)
         mock_session_class.return_value = mock_session
 
-        result = create_terminal(
-            "test123",
-            "cao-session",
-            "developer-abcd",
-            "kiro_cli",
-            "developer",
-            zellij_tab_id=1,
-            zellij_pane_id=4,
-            launch_working_directory="/repo",
-        )
+        result = create_terminal("test123", "cao-session", "window-0", "kiro_cli", "developer")
 
         assert result["id"] == "test123"
-        assert result["session_name"] == "cao-session"
-        assert result["name"] == "developer-abcd"
-        assert result["zellij_tab_id"] == 1
-        assert result["zellij_pane_id"] == 4
-        assert result["launch_working_directory"] == "/repo"
         mock_session.add.assert_called_once()
         mock_session.commit.assert_called_once()
 
@@ -87,11 +72,8 @@ class TestTerminalOperations:
 
         mock_terminal = MagicMock()
         mock_terminal.id = "test123"
-        mock_terminal.session_name = "cao-session"
-        mock_terminal.terminal_name = "developer-abcd"
-        mock_terminal.zellij_tab_id = 1
-        mock_terminal.zellij_pane_id = 4
-        mock_terminal.launch_working_directory = "/repo"
+        mock_terminal.tmux_session = "cao-session"
+        mock_terminal.tmux_window = "window-0"
         mock_terminal.provider = "kiro_cli"
         mock_terminal.agent_profile = "developer"
         mock_terminal.allowed_tools = None
@@ -106,11 +88,6 @@ class TestTerminalOperations:
 
         assert result is not None
         assert result["id"] == "test123"
-        assert result["session_name"] == "cao-session"
-        assert result["terminal_name"] == "developer-abcd"
-        assert result["zellij_tab_id"] == 1
-        assert result["zellij_pane_id"] == 4
-        assert result["launch_working_directory"] == "/repo"
 
     @patch("cli_agent_orchestrator.clients.database.SessionLocal")
     def test_get_terminal_metadata_not_found(self, mock_session_class):
@@ -144,6 +121,41 @@ class TestTerminalOperations:
         update_last_active("test123")
 
         mock_session.commit.assert_called_once()
+
+    @patch("cli_agent_orchestrator.clients.database.SessionLocal")
+    def test_update_terminal_shell_command(self, mock_session_class):
+        """Test updating shell_command baseline for a terminal."""
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+
+        mock_terminal = MagicMock()
+        mock_query = MagicMock()
+        mock_query.filter.return_value.first.return_value = mock_terminal
+        mock_session.query.return_value = mock_query
+        mock_session_class.return_value = mock_session
+
+        result = update_terminal_shell_command("test123", "bash")
+
+        assert result is True
+        assert mock_terminal.shell_command == "bash"
+        mock_session.commit.assert_called_once()
+
+    @patch("cli_agent_orchestrator.clients.database.SessionLocal")
+    def test_update_terminal_shell_command_not_found(self, mock_session_class):
+        """Test updating shell_command for a terminal that doesn't exist."""
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+
+        mock_query = MagicMock()
+        mock_query.filter.return_value.first.return_value = None
+        mock_session.query.return_value = mock_query
+        mock_session_class.return_value = mock_session
+
+        result = update_terminal_shell_command("nonexistent", "bash")
+
+        assert result is False
 
     @patch("cli_agent_orchestrator.clients.database.SessionLocal")
     def test_delete_terminal(self, mock_session_class):
@@ -187,13 +199,10 @@ class TestTerminalOperations:
 
         mock_terminal = MagicMock()
         mock_terminal.id = "test123"
-        mock_terminal.session_name = "cao-session"
-        mock_terminal.terminal_name = "developer-abcd"
+        mock_terminal.tmux_session = "cao-session"
+        mock_terminal.tmux_window = "window-0"
         mock_terminal.provider = "kiro_cli"
         mock_terminal.agent_profile = "developer"
-        mock_terminal.zellij_tab_id = 1
-        mock_terminal.zellij_pane_id = 4
-        mock_terminal.launch_working_directory = "/repo"
         mock_terminal.last_active = datetime.now()
 
         mock_query = MagicMock()
@@ -205,9 +214,6 @@ class TestTerminalOperations:
 
         assert len(result) == 1
         assert result[0]["id"] == "test123"
-        assert result[0]["session_name"] == "cao-session"
-        assert result[0]["name"] == "developer-abcd"
-        assert "terminal_name" not in result[0]
 
     @patch("cli_agent_orchestrator.clients.database.SessionLocal")
     def test_list_pending_receiver_ids_by_provider(self, mock_session_class):
@@ -593,55 +599,69 @@ class TestInitDb:
     """Tests for init_db function."""
 
     @patch("cli_agent_orchestrator.clients.database.Base")
-    def test_init_db(self, mock_base):
+    @patch("cli_agent_orchestrator.clients.database._migrate_project_aliases_schema")
+    def test_init_db(self, mock_alias_migrate, mock_base):
         """Test database initialization."""
         init_db()
 
         mock_base.metadata.create_all.assert_called_once()
 
-    def test_legacy_tmux_not_null_columns_are_relaxed(self, tmp_path, monkeypatch):
-        """Old local databases had NOT NULL tmux columns that block Zellij inserts."""
+
+class TestProjectAliasMigration:
+    """Tests for the project_aliases alias-only primary-key migration."""
+
+    def test_legacy_composite_pk_table_is_rebuilt(self, tmp_path, monkeypatch):
+        """A legacy table with composite PK (project_id, alias) is dropped."""
+        import sqlite3
+
+        from cli_agent_orchestrator.clients import database as db_mod
+
         db_file = tmp_path / "legacy.db"
-        with sqlite3.connect(db_file) as conn:
+        with sqlite3.connect(str(db_file)) as conn:
             conn.execute(
-                """
-                CREATE TABLE terminals (
-                    id TEXT PRIMARY KEY,
-                    tmux_session TEXT NOT NULL,
-                    tmux_window TEXT NOT NULL,
-                    provider TEXT NOT NULL,
-                    agent_profile TEXT,
-                    allowed_tools TEXT,
-                    last_active DATETIME
-                )
-                """
+                "CREATE TABLE project_aliases ("
+                "project_id TEXT NOT NULL, alias TEXT NOT NULL, kind TEXT NOT NULL, "
+                "created_at TEXT, PRIMARY KEY (project_id, alias))"
             )
-            conn.execute(
-                """
-                INSERT INTO terminals (
-                    id, tmux_session, tmux_window, provider, agent_profile, last_active
-                )
-                VALUES ('old-term', 'cao-old', 'developer-old', 'claude_code', 'developer', CURRENT_TIMESTAMP)
-                """
-            )
+            conn.execute("INSERT INTO project_aliases VALUES ('p1', 'a1', 'cwd_hash', NULL)")
             conn.commit()
 
-        monkeypatch.setattr("cli_agent_orchestrator.constants.DATABASE_FILE", db_file)
+        monkeypatch.setattr(db_mod, "DATABASE_FILE", db_file, raising=False)
+        monkeypatch.setattr(
+            "cli_agent_orchestrator.constants.DATABASE_FILE", db_file, raising=False
+        )
 
-        database._migrate_terminal_runtime_columns()
+        db_mod._migrate_project_aliases_schema()
 
-        with sqlite3.connect(db_file) as conn:
-            columns = {
-                row[1]: {"notnull": row[3]}
-                for row in conn.execute("PRAGMA table_info(terminals)").fetchall()
-            }
-            assert columns["tmux_session"]["notnull"] == 0
-            assert columns["tmux_window"]["notnull"] == 0
-            row = conn.execute(
-                """
-                SELECT session_name, terminal_name, tmux_session, tmux_window
-                FROM terminals
-                WHERE id = 'old-term'
-                """
+        with sqlite3.connect(str(db_file)) as conn:
+            exists = conn.execute(
+                "SELECT name FROM sqlite_master " "WHERE type='table' AND name='project_aliases'"
             ).fetchone()
-            assert row == ("cao-old", "developer-old", "cao-old", "developer-old")
+        assert exists is None, "legacy table should be dropped for create_all to rebuild"
+
+    def test_alias_only_pk_table_is_left_intact(self, tmp_path, monkeypatch):
+        """A table already keyed on alias alone is not touched."""
+        import sqlite3
+
+        from cli_agent_orchestrator.clients import database as db_mod
+
+        db_file = tmp_path / "current.db"
+        with sqlite3.connect(str(db_file)) as conn:
+            conn.execute(
+                "CREATE TABLE project_aliases ("
+                "alias TEXT PRIMARY KEY, project_id TEXT NOT NULL, kind TEXT NOT NULL, "
+                "created_at TEXT)"
+            )
+            conn.execute("INSERT INTO project_aliases VALUES ('a1', 'p1', 'cwd_hash', NULL)")
+            conn.commit()
+
+        monkeypatch.setattr(db_mod, "DATABASE_FILE", db_file, raising=False)
+        monkeypatch.setattr(
+            "cli_agent_orchestrator.constants.DATABASE_FILE", db_file, raising=False
+        )
+
+        db_mod._migrate_project_aliases_schema()
+
+        with sqlite3.connect(str(db_file)) as conn:
+            rows = conn.execute("SELECT alias, project_id FROM project_aliases").fetchall()
+        assert rows == [("a1", "p1")], "current-schema table must be left intact"

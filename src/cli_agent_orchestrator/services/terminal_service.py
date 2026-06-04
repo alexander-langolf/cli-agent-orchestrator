@@ -1,6 +1,24 @@
-"""Terminal service with workflow functions."""
+"""Terminal service with workflow functions.
+
+This module provides high-level terminal management operations that orchestrate
+multiple components (database, tmux, providers) to create a unified terminal
+abstraction for CLI agents.
+
+Key Responsibilities:
+- Terminal lifecycle management (create, get, delete)
+- Provider initialization and cleanup
+- Tmux session/window management
+- Terminal output capture and message extraction
+
+Terminal Workflow:
+1. create_terminal() → Creates tmux window, initializes provider, starts logging
+2. send_input() → Sends user message to the agent via tmux
+3. get_output() → Retrieves agent response from terminal history
+4. delete_terminal() → Cleans up provider, database record, and logging
+"""
 
 import logging
+import threading
 import time
 from datetime import datetime
 from enum import Enum
@@ -11,8 +29,9 @@ from cli_agent_orchestrator.clients.database import delete_terminal as db_delete
 from cli_agent_orchestrator.clients.database import (
     get_terminal_metadata,
     update_last_active,
+    update_terminal_shell_command,
 )
-from cli_agent_orchestrator.clients.zellij import zellij_client
+from cli_agent_orchestrator.clients.tmux import tmux_client
 from cli_agent_orchestrator.constants import SESSION_PREFIX, TERMINAL_LOG_DIR
 from cli_agent_orchestrator.models.inbox import OrchestrationType
 from cli_agent_orchestrator.models.provider import ProviderType
@@ -24,7 +43,13 @@ from cli_agent_orchestrator.plugins import (
     PostSendMessageEvent,
 )
 from cli_agent_orchestrator.providers.manager import provider_manager
+from cli_agent_orchestrator.services.memory_service import MemoryService
 from cli_agent_orchestrator.services.plugin_dispatch import dispatch_plugin_event
+from cli_agent_orchestrator.services.session_env import (
+    clear_session_env,
+    get_session_env,
+    set_session_env,
+)
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.skills import build_skill_catalog
 from cli_agent_orchestrator.utils.terminal import (
@@ -34,6 +59,35 @@ from cli_agent_orchestrator.utils.terminal import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Track terminals that have already received memory injection (first message only).
+_memory_injected_terminals: set = set()
+_memory_injected_lock = threading.Lock()
+
+
+def inject_memory_context(first_message: str, terminal_id: str) -> str:
+    """Prepend <cao-memory> context block to the first user message.
+
+    Tracks which terminals have already been injected so that only the very
+    first user message after init receives the memory block.
+
+    Calls MemoryService.get_memory_context_for_terminal() which returns
+    a formatted <cao-memory>...</cao-memory> block (or empty string if
+    no memories exist). Stateless — no file mutation, no backup/restore.
+    """
+    with _memory_injected_lock:
+        if terminal_id in _memory_injected_terminals:
+            return first_message
+        _memory_injected_terminals.add(terminal_id)
+
+    try:
+        svc = MemoryService()
+        context = svc.get_curated_memory_context(terminal_id, task_description=first_message[:200])
+        if context:
+            return context + "\n\n" + first_message
+    except Exception as e:
+        logger.warning(f"Failed to inject memory context for terminal {terminal_id}: {e}")
+    return first_message
 
 
 class OutputMode(str, Enum):
@@ -68,15 +122,29 @@ def create_terminal(
     working_directory: Optional[str] = None,
     allowed_tools: Optional[list[str]] = None,
     registry: PluginRegistry | None = None,
+    env_vars: Optional[dict[str, str]] = None,
 ) -> Terminal:
     """Create a new terminal with an initialized CLI agent.
+
+    This function orchestrates the complete terminal creation workflow:
+    1. Generate unique terminal ID and window name
+    2. Create tmux session/window (new or existing)
+    3. Save terminal metadata to database
+    4. Initialize the CLI provider (starts the agent)
+    5. Set up terminal logging via tmux pipe-pane
 
     Args:
         provider: Provider type string (e.g., "kiro_cli", "claude_code")
         agent_profile: Name of the agent profile to use
         session_name: Optional custom session name. If not provided, auto-generated.
-        new_session: If True, creates a new Zellij session. If False, adds to existing.
+        new_session: If True, creates a new tmux session. If False, adds to existing.
         working_directory: Optional working directory for the terminal shell
+        env_vars: Operator-forwarded env vars (``cao launch --env``). On
+            ``new_session=True``, these are stored on the session record and
+            inherited by every worker spawned later in the same session. On
+            ``new_session=False``, the persisted session vars are merged in
+            automatically; the explicit ``env_vars`` argument is ignored to
+            keep the per-session view consistent. See issue #248.
 
     Returns:
         Terminal object with all metadata populated
@@ -85,7 +153,7 @@ def create_terminal(
         ValueError: If session already exists (new_session=True) or not found (new_session=False)
         TimeoutError: If provider initialization times out
     """
-    session_created = False  # tracks whether THIS call created the Zellij session
+    session_created = False  # tracks whether THIS call created the tmux session
     try:
         # Step 1: Generate unique identifiers
         terminal_id = generate_terminal_id()
@@ -93,43 +161,57 @@ def create_terminal(
         if not session_name:
             session_name = generate_session_name()
 
-        terminal_name = generate_window_name(agent_profile)
-        runtime_info = None
+        window_name = generate_window_name(agent_profile)
 
-        # Step 2: Create Zellij session or tab
+        # Step 2: Create tmux session or window
         if new_session:
             # Ensure session name has the CAO prefix for identification
             if not session_name.startswith(SESSION_PREFIX):
                 session_name = f"{SESSION_PREFIX}{session_name}"
 
             # Prevent duplicate sessions
-            if zellij_client.session_exists(session_name):
+            if tmux_client.session_exists(session_name):
                 raise ValueError(f"Session '{session_name}' already exists")
 
-            runtime_info = zellij_client.create_session(
-                session_name, terminal_name, terminal_id, working_directory
+            # Wipe any stale mapping a prior aborted lifecycle for this name
+            # may have left behind, so a no-env relaunch can't inherit them.
+            clear_session_env(session_name)
+
+            # Create new tmux session with initial window
+            tmux_client.create_session(
+                session_name,
+                window_name,
+                terminal_id,
+                working_directory,
+                extra_env=env_vars,
             )
             session_created = True  # only set after successful creation
+
+            # Persist forwarded env only after the tmux session actually
+            # exists; the failure path below clears it if a later step
+            # tears the session back down.
+            if env_vars:
+                set_session_env(session_name, env_vars)
         else:
-            # Add tab to existing session
-            if not zellij_client.session_exists(session_name):
+            # Add window to existing session
+            if not tmux_client.session_exists(session_name):
                 raise ValueError(f"Session '{session_name}' not found")
-            runtime_info = zellij_client.create_window(
-                session_name, terminal_name, terminal_id, working_directory
+            window_name = tmux_client.create_window(
+                session_name,
+                window_name,
+                terminal_id,
+                working_directory,
+                extra_env=get_session_env(session_name),
             )
-            terminal_name = runtime_info.name
 
         # Step 3: Persist terminal metadata to database
         db_create_terminal(
             terminal_id,
             session_name,
-            terminal_name,
+            window_name,
             provider,
             agent_profile,
             allowed_tools,
-            zellij_tab_id=runtime_info.tab_id,
-            zellij_pane_id=runtime_info.pane_id,
-            launch_working_directory=runtime_info.launch_working_directory,
         )
 
         # Step 3b: Load the profile once for allowed tool resolution before
@@ -160,7 +242,7 @@ def create_terminal(
             provider,
             terminal_id,
             session_name,
-            terminal_name,
+            window_name,
             agent_profile,
             allowed_tools,
             skill_prompt=skill_prompt,
@@ -168,21 +250,27 @@ def create_terminal(
         )
         provider_instance.initialize()
 
-        # Step 5: Set up terminal logging via Zellij subscribe
+        # Persist shell_command baseline if the provider captured one
+        shell_command = provider_instance.shell_baseline
+        if not isinstance(shell_command, str):
+            shell_command = None
+        if shell_command:
+            update_terminal_shell_command(terminal_id, shell_command)
+
+        # Step 5: Set up terminal logging via tmux pipe-pane
         # This captures all terminal output to a log file for inbox monitoring
         log_path = TERMINAL_LOG_DIR / f"{terminal_id}.log"
         log_path.touch()  # Ensure file exists before watching
-        zellij_client.start_log_subscription(
-            terminal_id, session_name, runtime_info.pane_id, str(log_path)
-        )
+        tmux_client.pipe_pane(session_name, window_name, str(log_path))
 
         # Build and return the Terminal object
         terminal = Terminal(
             id=terminal_id,
-            name=terminal_name,
+            name=window_name,
             provider=ProviderType(provider),
             session_name=session_name,
             agent_profile=agent_profile,
+            shell_command=shell_command,
             status=TerminalStatus.IDLE,
             last_active=datetime.now(),
         )
@@ -211,9 +299,13 @@ def create_terminal(
             pass  # Ignore cleanup errors
         if session_created and session_name:
             try:
-                zellij_client.kill_session(session_name)
+                tmux_client.kill_session(session_name)
             except:
                 pass  # Ignore cleanup errors
+            # Session is gone, drop any forwarded env we stashed for it so
+            # secrets don't linger in memory or bleed into a future reuse
+            # of the same name.
+            clear_session_env(session_name)
         raise
 
 
@@ -232,9 +324,9 @@ def get_terminal(terminal_id: str) -> Dict:
 
         return {
             "id": metadata["id"],
-            "name": metadata["terminal_name"],
+            "name": metadata["tmux_window"],
             "provider": metadata["provider"],
-            "session_name": metadata["session_name"],
+            "session_name": metadata["tmux_session"],
             "agent_profile": metadata["agent_profile"],
             "allowed_tools": metadata.get("allowed_tools"),
             "status": status,
@@ -264,10 +356,8 @@ def get_working_directory(terminal_id: str) -> Optional[str]:
         if not metadata:
             raise ValueError(f"Terminal '{terminal_id}' not found")
 
-        working_dir = zellij_client.get_pane_working_directory(
-            metadata["session_name"],
-            metadata["terminal_name"],
-            metadata.get("launch_working_directory"),
+        working_dir = tmux_client.get_pane_working_directory(
+            metadata["tmux_session"], metadata["tmux_window"]
         )
         return working_dir
 
@@ -283,7 +373,7 @@ def send_input(
     sender_id: str | None = None,
     orchestration_type: OrchestrationType | None = None,
 ) -> bool:
-    """Send input to terminal via bracketed paste.
+    """Send input to terminal via tmux paste buffer.
 
     Uses bracketed paste mode (-p) to bypass TUI hotkey handling. The number
     of Enter keys sent after pasting is determined by the provider's
@@ -295,12 +385,27 @@ def send_input(
         if not metadata:
             raise ValueError(f"Terminal '{terminal_id}' not found")
 
+        # Inject memory context into the very first user message after init.
+        # Phase 1 wires injection inline for every provider. The Kiro
+        # AgentSpawn hook will replace this path once the plugin
+        # migration PR lands; until then, inline injection is the only
+        # delivery path.
+        # Keep the original message for the PostSendMessageEvent so
+        # plugins/webhooks see what the caller sent — not the
+        # internal <cao-memory> block that we paste into the TUI.
+        original_message = message
+        message = inject_memory_context(message, terminal_id)
+
         # Check how many Enter keys the provider needs after paste
         provider = provider_manager.get_provider(terminal_id)
         enter_count = provider.paste_enter_count if provider else 1
 
-        zellij_client.send_keys(
-            metadata["session_name"], metadata["terminal_name"], message, enter_count=enter_count
+        tmux_client.send_keys(
+            metadata["tmux_session"],
+            metadata["tmux_window"],
+            message,
+            enter_count=enter_count,
+            force_bracketed_paste=True,
         )
 
         # Notify the provider that external input was received.
@@ -317,10 +422,10 @@ def send_input(
                 registry,
                 "post_send_message",
                 PostSendMessageEvent(
-                    session_id=metadata["session_name"],
+                    session_id=metadata["tmux_session"],
                     sender=sender_id,
                     receiver=terminal_id,
-                    message=message,
+                    message=original_message,
                     orchestration_type=orchestration_type,
                 ),
             )
@@ -332,14 +437,14 @@ def send_input(
 
 
 def send_special_key(terminal_id: str, key: str) -> bool:
-    """Send a special key sequence (e.g., C-d, C-c) to terminal.
+    """Send a tmux special key sequence (e.g., C-d, C-c) to terminal.
 
-    Unlike send_input(), this sends the key as a key name (not literal text)
+    Unlike send_input(), this sends the key as a tmux key name (not literal text)
     and does not append a carriage return. Used for control signals like Ctrl+D (EOF).
 
     Args:
         terminal_id: Target terminal identifier
-        key: CAO key name (e.g., "C-d", "C-c", "Escape")
+        key: Tmux key name (e.g., "C-d", "C-c", "Escape")
 
     Returns:
         True if the key was sent successfully
@@ -352,7 +457,7 @@ def send_special_key(terminal_id: str, key: str) -> bool:
         if not metadata:
             raise ValueError(f"Terminal '{terminal_id}' not found")
 
-        zellij_client.send_special_key(metadata["session_name"], metadata["terminal_name"], key)
+        tmux_client.send_special_key(metadata["tmux_session"], metadata["tmux_window"], key)
 
         update_last_active(terminal_id)
         logger.info(f"Sent special key '{key}' to terminal: {terminal_id}")
@@ -369,12 +474,13 @@ def get_output(terminal_id: str, mode: OutputMode = OutputMode.FULL) -> str:
     For ``LAST`` mode, if the provider declares ``extraction_retries > 0``,
     retries extraction with 10 s delays between attempts.  This handles
     TUI-based providers (e.g. Gemini CLI's Ink renderer) whose notification
-    spinners can temporarily obscure response text in the terminal capture buffer.
+    spinners can temporarily obscure response text in the tmux capture buffer.
 
     If the provider exposes an ``extraction_tail_lines`` attribute, the
     history capture for LAST mode uses that value instead of the default
-    terminal history size. Status-check captures are unaffected because
-    they go through get_status directly.
+    ``TMUX_HISTORY_LINES``. Status-check captures are unaffected (they go
+    through get_status directly). A single capture-pane call is made per
+    get_output invocation.
     """
     try:
         metadata = get_terminal_metadata(terminal_id)
@@ -382,7 +488,7 @@ def get_output(terminal_id: str, mode: OutputMode = OutputMode.FULL) -> str:
             raise ValueError(f"Terminal '{terminal_id}' not found")
 
         if mode == OutputMode.FULL:
-            return zellij_client.get_history(metadata["session_name"], metadata["terminal_name"])
+            return tmux_client.get_history(metadata["tmux_session"], metadata["tmux_window"])
         elif mode == OutputMode.LAST:
             provider = provider_manager.get_provider(terminal_id)
             if provider is None:
@@ -391,9 +497,9 @@ def get_output(terminal_id: str, mode: OutputMode = OutputMode.FULL) -> str:
             # Capability check: providers that need deeper scrollback for extraction
             # opt in by defining ``extraction_tail_lines``. Base providers don't.
             extract_lines = getattr(provider, "extraction_tail_lines", None)
-            full_output = zellij_client.get_history(
-                metadata["session_name"],
-                metadata["terminal_name"],
+            full_output = tmux_client.get_history(
+                metadata["tmux_session"],
+                metadata["tmux_window"],
                 tail_lines=extract_lines,
             )
 
@@ -403,9 +509,9 @@ def get_output(terminal_id: str, mode: OutputMode = OutputMode.FULL) -> str:
                 try:
                     if attempt > 0:
                         time.sleep(10.0)
-                        full_output = zellij_client.get_history(
-                            metadata["session_name"],
-                            metadata["terminal_name"],
+                        full_output = tmux_client.get_history(
+                            metadata["tmux_session"],
+                            metadata["tmux_window"],
                             tail_lines=extract_lines,
                         )
                     return provider.extract_last_message_from_script(full_output)
@@ -426,30 +532,63 @@ def get_output(terminal_id: str, mode: OutputMode = OutputMode.FULL) -> str:
 
 
 def delete_terminal(terminal_id: str, registry: PluginRegistry | None = None) -> bool:
-    """Delete terminal and close its Zellij tab."""
+    """Delete terminal and kill its tmux window."""
     try:
         # Get metadata before deletion
         metadata = get_terminal_metadata(terminal_id)
 
         if metadata:
-            # Stop log subscription
+            # Snapshot scrollback + metadata before killing (for debugging/restore)
             try:
-                zellij_client.stop_log_subscription(terminal_id)
-            except Exception as e:
-                logger.warning(f"Failed to stop log subscription for {terminal_id}: {e}")
-
-            # Kill the Zellij tab (this terminates the agent process)
-            try:
-                zellij_client.kill_window(
-                    metadata["session_name"],
-                    metadata["terminal_name"],
-                    metadata.get("zellij_tab_id"),
+                # Capture plain text full scrollback (no -e, no line cap)
+                scrollback = tmux_client.get_history(
+                    metadata["tmux_session"],
+                    metadata["tmux_window"],
+                    strip_escapes=True,
+                    full_history=True,
                 )
+                scrollback_path = TERMINAL_LOG_DIR / f"{terminal_id}.scrollback"
+                scrollback_path.write_text(scrollback, encoding="utf-8")
+
+                import json as _json
+
+                snapshot = {
+                    "terminal_id": terminal_id,
+                    "session_name": metadata["tmux_session"],
+                    "window_name": metadata["tmux_window"],
+                    "agent_profile": metadata.get("agent_profile"),
+                    "provider": metadata["provider"],
+                    "working_directory": tmux_client.get_pane_working_directory(
+                        metadata["tmux_session"], metadata["tmux_window"]
+                    ),
+                    "allowed_tools": metadata.get("allowed_tools"),
+                }
+                snapshot_path = TERMINAL_LOG_DIR / f"{terminal_id}.snapshot.json"
+                snapshot_path.write_text(_json.dumps(snapshot, indent=2), encoding="utf-8")
             except Exception as e:
-                logger.warning(f"Failed to kill Zellij tab for {terminal_id}: {e}")
+                logger.warning(f"Failed to snapshot terminal {terminal_id}: {e}")
+
+            # Stop pipe-pane logging
+            try:
+                tmux_client.stop_pipe_pane(metadata["tmux_session"], metadata["tmux_window"])
+            except Exception as e:
+                logger.warning(f"Failed to stop pipe-pane for {terminal_id}: {e}")
+
+            # Kill the tmux window (this terminates the agent process)
+            try:
+                tmux_client.kill_window(metadata["tmux_session"], metadata["tmux_window"])
+            except Exception as e:
+                logger.warning(f"Failed to kill tmux window for {terminal_id}: {e}")
 
         # Cleanup provider state and database record
         provider_manager.cleanup_provider(terminal_id)
+        with _memory_injected_lock:
+            _memory_injected_terminals.discard(terminal_id)
+        # Drop any per-curator dispatch lock so the registry doesn't grow
+        # forever as memory_manager terminals come and go.
+        from cli_agent_orchestrator.services.memory_service import _curator_locks
+
+        _curator_locks.pop(terminal_id, None)
         deleted = db_delete_terminal(terminal_id)
         logger.info(f"Deleted terminal: {terminal_id}")
         if deleted and metadata:
@@ -457,7 +596,7 @@ def delete_terminal(terminal_id: str, registry: PluginRegistry | None = None) ->
                 registry,
                 "post_kill_terminal",
                 PostKillTerminalEvent(
-                    session_id=metadata["session_name"],
+                    session_id=metadata["tmux_session"],
                     terminal_id=terminal_id,
                     agent_name=metadata.get("agent_profile"),
                 ),

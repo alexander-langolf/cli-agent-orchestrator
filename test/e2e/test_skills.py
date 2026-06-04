@@ -2,10 +2,10 @@
 
 Tests the full skill pipeline — validates that:
 1. The skill catalog text is injected into the provider CLI command
-   (verified by inspecting the Zellij scrollback, not LLM output)
+   (verified by inspecting the tmux scrollback, not LLM output)
 2. The load_skill MCP tool / API endpoint returns installed skill content
 
-Requires: running CAO server, authenticated CLI tools, Zellij, seeded skills.
+Requires: running CAO server, authenticated CLI tools, tmux, seeded skills.
 
 Run:
     uv run pytest -m e2e test/e2e/test_skills.py -v
@@ -13,7 +13,7 @@ Run:
     uv run pytest -m e2e test/e2e/test_skills.py -v -k ClaudeCode
 """
 
-import os
+import subprocess
 import time
 import uuid
 from test.e2e.conftest import (
@@ -26,8 +26,7 @@ import pytest
 import requests
 
 from cli_agent_orchestrator.cli.commands.init import seed_default_skills
-from cli_agent_orchestrator.clients.zellij import zellij_client
-from cli_agent_orchestrator.constants import API_BASE_URL
+from cli_agent_orchestrator.constants import API_BASE_URL, GEMINI_WORKSPACES_DIR
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -37,12 +36,21 @@ def ensure_skills_seeded():
 
 
 def _capture_full_scrollback(session_name: str, window_name: str) -> str:
-    """Capture the full Zellij scrollback buffer for a pane.
+    """Capture the full tmux scrollback buffer for a pane.
 
-    Uses Zellij dump-screen through the runtime client with a large tail so
-    the initial CLI command containing the injected skill catalog is retained.
+    Uses ``tmux capture-pane -p -S -`` to capture from the very start of
+    the scrollback buffer, not just the last N lines. This ensures the
+    initial CLI command (which contains the injected skill catalog) is
+    included even if the agent's output has pushed it far up.
     """
-    return zellij_client.get_history(session_name, window_name, tail_lines=10000)
+    target = f"{session_name}:{window_name}"
+    result = subprocess.run(
+        ["tmux", "capture-pane", "-p", "-S", "-", "-t", target],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return result.stdout
 
 
 def _run_skill_injection_test(provider: str, agent_profile: str):
@@ -52,7 +60,7 @@ def _run_skill_injection_test(provider: str, agent_profile: str):
     skill catalog text reached the provider.
 
     For most providers the catalog is embedded in the CLI command string
-    sent via Zellij paste and is therefore visible in Zellij scrollback.
+    sent via tmux send-keys and is therefore visible in tmux scrollback.
     Gemini CLI is an exception: its system prompt is written to
     ``GEMINI.md`` in the working directory because passing the catalog via
     ``-i`` causes Gemini to treat it as a task to execute. For Gemini we
@@ -89,17 +97,21 @@ def _run_skill_injection_test(provider: str, agent_profile: str):
         # The catalog is global in Phase 1, so any installed skill should appear.
         if provider == "gemini_cli":
             # Gemini writes the full system prompt (including the skill catalog)
-            # to GEMINI.md in the working directory rather than embedding it in
-            # the CLI command — the command carries only a short role-acknowledge
-            # prompt via -i. Read GEMINI.md directly.
-            payload = _read_gemini_md()
+            # to GEMINI.md inside a per-terminal workspace under
+            # GEMINI_WORKSPACES_DIR / <terminal_id>/. The CLI command carries
+            # only a short role-acknowledge prompt via -i. Read the workspace
+            # GEMINI.md directly.
+            payload = _read_gemini_md(terminal_id)
             source = "GEMINI.md"
         else:
+            # Capture the full tmux scrollback (capture-pane -S - reads from the
+            # very start of the buffer so the initial CLI command with the
+            # injected catalog is included).
             resp = requests.get(f"{API_BASE_URL}/terminals/{terminal_id}")
             assert resp.status_code == 200
             window_name = resp.json()["name"]
             payload = _capture_full_scrollback(actual_session, window_name)
-            source = "Zellij scrollback"
+            source = "tmux scrollback"
 
         assert len(payload.strip()) > 0, f"{source} should not be empty"
 
@@ -117,24 +129,25 @@ def _run_skill_injection_test(provider: str, agent_profile: str):
             cleanup_terminal(terminal_id, actual_session)
 
 
-def _read_gemini_md() -> str:
-    """Read GEMINI.md from the current working directory.
+def _read_gemini_md(terminal_id: str) -> str:
+    """Read GEMINI.md from the per-terminal Gemini workspace.
 
     The Gemini CLI provider writes its system prompt (including the injected
-    skill catalog) to ``GEMINI.md`` in the pane's working directory, which is
-    the same directory the test runs from. Returns empty string if the file
-    does not exist so the caller can produce a useful assertion error.
+    skill catalog) into an isolated per-terminal workspace under
+    ``GEMINI_WORKSPACES_DIR / <terminal_id>/GEMINI.md`` to avoid races with
+    parallel gemini sessions sharing the project cwd. Returns an empty string
+    if the file does not exist so the caller can produce a useful assertion
+    error.
     """
-    path = os.path.join(os.getcwd(), "GEMINI.md")
+    path = GEMINI_WORKSPACES_DIR / terminal_id / "GEMINI.md"
     try:
-        with open(path, encoding="utf-8") as f:
-            return f.read()
+        return path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return ""
 
 
 # ---------------------------------------------------------------------------
-# Skill catalog injection tests (deterministic — checks Zellij command string)
+# Skill catalog injection tests (deterministic — checks tmux command string)
 # ---------------------------------------------------------------------------
 
 
@@ -149,7 +162,7 @@ class TestCodexSkills:
 
 # NOTE: Claude Code is excluded from injection tests because its full-screen
 # TUI clears the visible screen on startup, wiping the tail of the long
-# command (where the skill catalog lives) from the Zellij scrollback. Skill
+# command (where the skill catalog lives) from the tmux scrollback. Skill
 # injection for Claude Code is covered by unit tests (_apply_skill_prompt,
 # skill_prompt kwarg passing) and validated indirectly via the Codex test
 # which exercises the same global-catalog service-layer code path.

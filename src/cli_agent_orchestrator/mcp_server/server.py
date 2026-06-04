@@ -10,10 +10,15 @@ import requests
 from fastmcp import FastMCP
 from pydantic import Field
 
-from cli_agent_orchestrator.constants import API_BASE_URL, DEFAULT_PROVIDER
+from cli_agent_orchestrator.constants import API_BASE_URL, DEFAULT_PROVIDER, MCP_REQUEST_TIMEOUT
 from cli_agent_orchestrator.mcp_server.models import HandoffResult
 from cli_agent_orchestrator.models.inbox import OrchestrationType
 from cli_agent_orchestrator.models.terminal import TerminalStatus
+from cli_agent_orchestrator.services.memory_service import (
+    MEMORY_DISABLED_MESSAGE,
+    MemoryDisabledError,
+)
+from cli_agent_orchestrator.utils.agent_profiles import resolve_provider
 from cli_agent_orchestrator.utils.terminal import generate_session_name, wait_until_terminal_status
 
 logger = logging.getLogger(__name__)
@@ -23,6 +28,40 @@ ENABLE_WORKING_DIRECTORY = os.getenv("CAO_ENABLE_WORKING_DIRECTORY", "false").lo
 
 # Environment variable to enable/disable automatic sender terminal ID injection
 ENABLE_SENDER_ID_INJECTION = os.getenv("CAO_ENABLE_SENDER_ID_INJECTION", "false").lower() == "true"
+
+# Terminal count threshold for cleanup nudge
+TERMINAL_CLEANUP_NUDGE_THRESHOLD = 10
+
+
+def _get_cleanup_nudge() -> str:
+    """Return a cleanup nudge string if the session has too many terminals, else empty string."""
+    current_terminal_id = os.environ.get("CAO_TERMINAL_ID")
+    if not current_terminal_id:
+        return ""
+    try:
+        resp = requests.get(
+            f"{API_BASE_URL}/terminals/{current_terminal_id}", timeout=MCP_REQUEST_TIMEOUT
+        )
+        if resp.status_code != 200:
+            return ""
+        session_name = resp.json().get("session_name")
+        if not session_name:
+            return ""
+        resp = requests.get(
+            f"{API_BASE_URL}/sessions/{session_name}/terminals", timeout=MCP_REQUEST_TIMEOUT
+        )
+        if resp.status_code != 200:
+            return ""
+        count = len(resp.json())
+        if count >= TERMINAL_CLEANUP_NUDGE_THRESHOLD:
+            return (
+                f" NOTE: This session has {count} terminals. "
+                f"Consider calling delete_terminal on terminals you no longer need."
+            )
+    except Exception:
+        pass
+    return ""
+
 
 # Create MCP server
 mcp = FastMCP(
@@ -120,11 +159,14 @@ def _create_terminal(
     current_terminal_id = os.environ.get("CAO_TERMINAL_ID")
     if current_terminal_id:
         # Get terminal metadata via API
-        response = requests.get(f"{API_BASE_URL}/terminals/{current_terminal_id}")
+        response = requests.get(
+            f"{API_BASE_URL}/terminals/{current_terminal_id}", timeout=MCP_REQUEST_TIMEOUT
+        )
         response.raise_for_status()
         terminal_metadata = response.json()
 
-        provider = terminal_metadata["provider"]
+        # Treat the supervisor provider as a fallback, not an explicit override.
+        provider = resolve_provider(agent_profile, fallback_provider=terminal_metadata["provider"])
         session_name = terminal_metadata["session_name"]
         parent_allowed_tools = terminal_metadata.get("allowed_tools")
 
@@ -132,7 +174,8 @@ def _create_terminal(
         if working_directory is None:
             try:
                 response = requests.get(
-                    f"{API_BASE_URL}/terminals/{current_terminal_id}/working-directory"
+                    f"{API_BASE_URL}/terminals/{current_terminal_id}/working-directory",
+                    timeout=MCP_REQUEST_TIMEOUT,
                 )
                 if response.status_code == 200:
                     working_directory = response.json().get("working_directory")
@@ -157,12 +200,17 @@ def _create_terminal(
         if child_allowed_tools:
             params["allowed_tools"] = child_allowed_tools
 
-        response = requests.post(f"{API_BASE_URL}/sessions/{session_name}/terminals", params=params)
+        response = requests.post(
+            f"{API_BASE_URL}/sessions/{session_name}/terminals",
+            params=params,
+            timeout=MCP_REQUEST_TIMEOUT,
+        )
         response.raise_for_status()
         terminal = response.json()
     else:
         # Create new session with terminal
         session_name = generate_session_name()
+        provider = resolve_provider(agent_profile, fallback_provider=provider)
         params = {
             "provider": provider,
             "agent_profile": agent_profile,
@@ -171,7 +219,9 @@ def _create_terminal(
         if working_directory:
             params["working_directory"] = working_directory
 
-        response = requests.post(f"{API_BASE_URL}/sessions", params=params)
+        response = requests.post(
+            f"{API_BASE_URL}/sessions", params=params, timeout=MCP_REQUEST_TIMEOUT
+        )
         response.raise_for_status()
         terminal = response.json()
 
@@ -198,6 +248,7 @@ def _send_direct_input(
             "sender_id": os.environ.get("CAO_TERMINAL_ID", "supervisor"),
             "orchestration_type": orchestration_type,
         },
+        timeout=MCP_REQUEST_TIMEOUT,
     )
     response.raise_for_status()
 
@@ -260,6 +311,7 @@ def _send_to_inbox(receiver_id: str, message: str) -> Dict[str, Any]:
             "sender_id": sender_id,
             "message": message,
         },
+        timeout=MCP_REQUEST_TIMEOUT,
     )
     response.raise_for_status()
     return response.json()
@@ -281,7 +333,7 @@ def _extract_error_detail(response: requests.Response, fallback: str) -> str:
 def _load_skill_impl(name: str) -> Union[str, Dict[str, Any]]:
     """Fetch a skill body from cao-server and return content or a structured error."""
     try:
-        response = requests.get(f"{API_BASE_URL}/skills/{name}")
+        response = requests.get(f"{API_BASE_URL}/skills/{name}", timeout=MCP_REQUEST_TIMEOUT)
         response.raise_for_status()
         return response.json()["content"]
     except requests.HTTPError as exc:
@@ -352,21 +404,33 @@ async def _handoff_impl(
 
         # Get the response
         response = requests.get(
-            f"{API_BASE_URL}/terminals/{terminal_id}/output", params={"mode": "last"}
+            f"{API_BASE_URL}/terminals/{terminal_id}/output",
+            params={"mode": "last"},
+            timeout=MCP_REQUEST_TIMEOUT,
         )
         response.raise_for_status()
         output_data = response.json()
         output = output_data["output"]
 
         # Send provider-specific exit command to cleanup terminal
-        response = requests.post(f"{API_BASE_URL}/terminals/{terminal_id}/exit")
+        response = requests.post(
+            f"{API_BASE_URL}/terminals/{terminal_id}/exit", timeout=MCP_REQUEST_TIMEOUT
+        )
         response.raise_for_status()
+
+        # Auto-delete the worker terminal after successful handoff
+        try:
+            requests.delete(f"{API_BASE_URL}/terminals/{terminal_id}", timeout=MCP_REQUEST_TIMEOUT)
+            logger.info(f"Auto-deleted handoff terminal {terminal_id}")
+        except Exception as e:
+            logger.warning(f"Failed to auto-delete handoff terminal {terminal_id}: {e}")
 
         execution_time = time.time() - start_time
 
         return HandoffResult(
             success=True,
-            message=f"Successfully handed off to {agent_profile} ({provider}) in {execution_time:.2f}s",
+            message=f"Successfully handed off to {agent_profile} ({provider}) in {execution_time:.2f}s"
+            + _get_cleanup_nudge(),
             output=output,
             terminal_id=terminal_id,
         )
@@ -513,7 +577,11 @@ def _assign_impl(
         return {
             "success": True,
             "terminal_id": terminal_id,
-            "message": f"Task assigned to {agent_profile} (terminal: {terminal_id})",
+            "message": (
+                f"Task assigned to {agent_profile} (terminal: {terminal_id}). "
+                f"Call delete_terminal('{terminal_id}') when you no longer need this terminal."
+                + _get_cleanup_nudge()
+            ),
         }
 
     except Exception as e:
@@ -547,6 +615,11 @@ Example message: "Analyze the logs. When done, send results back to terminal ee3
 - Directory must exist and be accessible"""
 
     desc += """
+
+## Cleanup
+
+When you are done with an assigned terminal (received results or no longer need it),
+call delete_terminal(terminal_id) to free system resources.
 
 Args:
     agent_profile: Agent profile for the worker terminal
@@ -603,6 +676,23 @@ else:
 def _send_message_impl(receiver_id: str, message: str) -> Dict[str, Any]:
     """Implementation of send_message logic."""
     try:
+        # Guard against the worker sending a message to itself (issue #24).
+        # Worker agents sometimes confuse their own CAO_TERMINAL_ID with the
+        # supervisor's and end up queueing a message into their own inbox,
+        # which never reaches the supervisor. Reject that here so the worker
+        # gets a clear error and can pick the correct receiver_id instead.
+        own_terminal_id = os.environ.get("CAO_TERMINAL_ID")
+        if own_terminal_id and receiver_id == own_terminal_id:
+            return {
+                "success": False,
+                "error": (
+                    f"receiver_id ({receiver_id}) is this terminal's own CAO_TERMINAL_ID. "
+                    "send_message cannot deliver to the sender. The callback terminal ID of "
+                    "the supervisor that assigned this task is in the task message — use "
+                    "that as receiver_id instead."
+                ),
+            }
+
         # Auto-inject sender terminal ID suffix when enabled
         if ENABLE_SENDER_ID_INJECTION:
             sender_id = os.environ.get("CAO_TERMINAL_ID", "unknown")
@@ -642,6 +732,243 @@ async def load_skill(
 ) -> Any:
     """Retrieve skill content from cao-server."""
     return _load_skill_impl(name)
+
+
+@mcp.tool()
+def delete_terminal(
+    terminal_id: str = Field(
+        description="The terminal ID to delete (obtained from assign or handoff results)"
+    ),
+) -> Dict[str, Any]:
+    """Delete a terminal that is no longer needed, freeing system resources.
+
+    Use this to clean up terminals created via assign once you have received
+    their results or no longer need them. This kills the tmux window and
+    removes the terminal record.
+
+    Handoff terminals are automatically cleaned up on success — you only need
+    to call this for assign terminals.
+
+    Args:
+        terminal_id: The terminal ID to delete
+
+    Returns:
+        Dict with success status and message
+    """
+    try:
+        response = requests.delete(
+            f"{API_BASE_URL}/terminals/{terminal_id}", timeout=MCP_REQUEST_TIMEOUT
+        )
+        response.raise_for_status()
+        return {"success": True, "message": f"Terminal {terminal_id} deleted successfully"}
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            return {"success": False, "message": f"Terminal {terminal_id} not found"}
+        return {"success": False, "message": f"Failed to delete terminal: {str(e)}"}
+    except Exception as e:
+        return {"success": False, "message": f"Failed to delete terminal: {str(e)}"}
+
+
+# =============================================================================
+# Memory Tools
+# =============================================================================
+
+
+def _get_terminal_context_from_env() -> Optional[Dict[str, Any]]:
+    """Build terminal context dict from the calling terminal's CAO_TERMINAL_ID."""
+    terminal_id = os.environ.get("CAO_TERMINAL_ID")
+    if not terminal_id:
+        return None
+
+    try:
+        response = requests.get(
+            f"{API_BASE_URL}/terminals/{terminal_id}", timeout=MCP_REQUEST_TIMEOUT
+        )
+        response.raise_for_status()
+        meta = response.json()
+        ctx: Dict[str, Any] = {
+            "terminal_id": meta["id"],
+            "session_name": meta["session_name"],
+            "provider": meta["provider"],
+            "agent_profile": meta.get("agent_profile"),
+        }
+        # Try to get working directory for project scope resolution
+        try:
+            wd_resp = requests.get(
+                f"{API_BASE_URL}/terminals/{terminal_id}/working-directory",
+                timeout=MCP_REQUEST_TIMEOUT,
+            )
+            if wd_resp.status_code == 200:
+                ctx["cwd"] = wd_resp.json().get("working_directory")
+        except Exception:
+            pass
+        return ctx
+    except Exception as e:
+        logger.warning(f"Failed to get terminal context for memory tools: {e}")
+        return None
+
+
+@mcp.tool()
+async def memory_store(
+    content: str = Field(description="Memory content to store (markdown supported)"),
+    scope: str = Field(
+        default="project",
+        description='Memory scope: "global", "project", "session", or "agent"',
+    ),
+    memory_type: str = Field(
+        default="project",
+        description='Memory type: "user", "feedback", "project", or "reference"',
+    ),
+    key: Optional[str] = Field(
+        default=None,
+        description="Slug identifier (e.g. 'prefer-pytest'). Auto-generated from content if omitted.",
+    ),
+    tags: Optional[str] = Field(
+        default=None,
+        description="Comma-separated tags for search (e.g. 'testing,pytest')",
+    ),
+) -> Dict[str, Any]:
+    """Store a persistent memory. Content is saved to a wiki file and indexed.
+
+    Identical key+scope combinations are updated (upsert) — new content is appended
+    as a timestamped entry. If key is omitted, it is auto-generated as a slug of the
+    first 6 words of content.
+
+    Use this to persist facts, decisions, user preferences, and project conventions
+    that should be available across agent sessions.
+    """
+    from cli_agent_orchestrator.services.memory_service import MemoryService
+
+    try:
+        service = MemoryService()
+        terminal_context = _get_terminal_context_from_env()
+        memory = await service.store(
+            content=content,
+            scope=scope,
+            memory_type=memory_type,
+            key=key,
+            tags=tags or "",
+            terminal_context=terminal_context,
+        )
+        return {
+            "success": True,
+            "key": memory.key,
+            "scope": memory.scope,
+            "scope_id": memory.scope_id,
+            "file_path": memory.file_path,
+            "action": memory.action
+            or ("updated" if memory.created_at != memory.updated_at else "created"),
+        }
+    except MemoryDisabledError as e:
+        return {"success": False, "disabled": True, "error": str(e)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def memory_recall(
+    query: Optional[str] = Field(
+        default=None,
+        description="Search query matched against memory content (case-insensitive)",
+    ),
+    scope: Optional[str] = Field(
+        default=None,
+        description='Filter by scope: "global", "project", "session", "agent". Omit to search all.',
+    ),
+    memory_type: Optional[str] = Field(
+        default=None,
+        description='Filter by type: "user", "feedback", "project", "reference". Omit for all types.',
+    ),
+    limit: int = Field(
+        default=10,
+        description="Maximum number of results to return",
+        ge=1,
+        le=100,
+    ),
+    search_mode: str = "hybrid",
+) -> Dict[str, Any]:
+    """Retrieve memories matching a query and optional filters.
+
+    Returns content from matching wiki files, sorted by recency.
+    When no scope is specified, results follow scope precedence: session > project > global.
+
+    Use this to check if relevant knowledge already exists before asking the user.
+    """
+    from cli_agent_orchestrator.services.memory_service import MemoryService
+    from cli_agent_orchestrator.services.settings_service import is_memory_enabled
+
+    if not is_memory_enabled():
+        return {
+            "success": False,
+            "disabled": True,
+            "error": MEMORY_DISABLED_MESSAGE,
+            "memories": [],
+        }
+
+    try:
+        service = MemoryService()
+        terminal_context = _get_terminal_context_from_env()
+        memories = await service.recall(
+            query=query,
+            scope=scope,
+            memory_type=memory_type,
+            limit=limit,
+            terminal_context=terminal_context,
+            search_mode=search_mode,
+        )
+        return {
+            "success": True,
+            "memories": [
+                {
+                    "key": m.key,
+                    "content": m.content,
+                    "memory_type": m.memory_type,
+                    "scope": m.scope,
+                    "tags": m.tags,
+                    "file_path": m.file_path,
+                    "updated_at": m.updated_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }
+                for m in memories
+            ],
+        }
+    except MemoryDisabledError as e:
+        return {"success": False, "disabled": True, "error": str(e)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def memory_forget(
+    key: str = Field(description="Key of the memory to remove (e.g. 'prefer-pytest')"),
+    scope: str = Field(
+        default="project",
+        description='Scope of the memory to remove: "global", "project", "session", or "agent"',
+    ),
+) -> Dict[str, Any]:
+    """Remove a memory by key and scope.
+
+    Deletes the wiki topic file and removes the entry from index.md.
+    """
+    from cli_agent_orchestrator.services.memory_service import MemoryService
+
+    try:
+        service = MemoryService()
+        terminal_context = _get_terminal_context_from_env()
+        deleted = await service.forget(
+            key=key,
+            scope=scope,
+            terminal_context=terminal_context,
+        )
+        return {
+            "success": True,
+            "deleted": deleted,
+            "key": key,
+            "scope": scope,
+        }
+    except MemoryDisabledError as e:
+        return {"success": False, "disabled": True, "error": str(e)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 def main():
