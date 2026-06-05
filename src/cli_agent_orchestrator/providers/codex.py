@@ -22,12 +22,12 @@ IDLE_PROMPT_PATTERN = r"(?:❯|›|codex>)"
 # so we can't anchor to \Z. Instead, check the last few lines where the prompt
 # and status bar appear.
 IDLE_PROMPT_TAIL_LINES = 5
-# The idle prompt character ❯ (U+276F) is rendered on-screen by capture-pane
-# but is NOT written to the raw output stream captured by pipe-pane.  Instead,
+# The idle prompt character is rendered on-screen but is not always present in
+# plain log output. Instead,
 # the TUI footer text "? for shortcuts" is reliably present whenever the TUI
 # is active.  This is intentionally permissive — _has_idle_pattern() is a
 # lightweight pre-check; the real status decision is made by get_status()
-# which uses capture-pane (rendered screen).
+# which uses rendered terminal text.
 IDLE_PROMPT_PATTERN_LOG = r"\? for shortcuts"
 # Match assistant response start: "assistant:/codex:/agent:" (label style from synthetic
 # test fixtures) or "•" bullet point (real Codex interactive output format).
@@ -241,11 +241,7 @@ class CodexProvider(BaseProvider):
 
             if re.search(TRUST_PROMPT_PATTERN, clean_output):
                 logger.info("Codex workspace trust prompt detected, auto-accepting")
-                session = tmux_client.server.sessions.get(session_name=self.session_name)
-                window = session.windows.get(window_name=self.window_name)
-                pane = window.active_pane
-                if pane:
-                    pane.send_keys("", enter=True)
+                tmux_client.send_special_key(self.session_name, self.window_name, "Enter")
                 return
 
             # Check if Codex has fully started (welcome banner visible)
@@ -262,15 +258,15 @@ class CodexProvider(BaseProvider):
             raise TimeoutError("Shell initialization timed out after 10 seconds")
 
         # Send a warm-up command before launching codex.
-        # Codex exits immediately in freshly-created tmux sessions where the shell
+        # Codex exits immediately in freshly-created kitty sessions where the shell
         # has not yet processed a full interactive command cycle.
         tmux_client.send_keys(self.session_name, self.window_name, "echo ready")
         time.sleep(2.0)
 
         # Build command with flags and agent profile (developer_instructions).
         # --no-alt-screen: run in inline mode so output stays in normal scrollback,
-        #   making tmux capture-pane reliable.
-        # --disable shell_snapshot: avoid TTY input conflicts (SIGTTIN) in tmux
+        #   making kitty get-text reliable.
+        # --disable shell_snapshot: avoid TTY input conflicts (SIGTTIN) in kitty
         #   caused by the shell_snapshot subprocess inheriting stdin.
         command = self._build_codex_command()
         tmux_client.send_keys(self.session_name, self.window_name, command)

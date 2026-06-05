@@ -16,7 +16,7 @@ For ready-to-try reference plugins, see [`examples/plugins/`](../examples/plugin
 
 This walkthrough takes you from a fresh clone to seeing plugin events fire end-to-end. It uses the bundled Discord example plugin, but the steps apply to any plugin.
 
-1. **Install CAO and its prerequisites** — follow [README.md § Installation](../README.md#installation) (uv, Zellij >=0.44.1, Python 3.10+, then `uv sync` for a dev checkout).
+1. **Install CAO and its prerequisites** — follow [README.md § Installation](../README.md#installation) (uv, kitty, Python 3.10+, then `uv sync` for a dev checkout).
 2. **Install the Discord plugin** into the same environment:
    ```bash
    uv pip install -e examples/plugins/cao-discord
@@ -159,6 +159,22 @@ Fires after a terminal has been shut down.
 | `timestamp`   | UTC timestamp of the event                        |
 
 Example use: remove the terminal from an external inventory or dashboard.
+
+### `post_terminal_interrupted`
+
+Fires after CAO detects that a terminal disappeared unexpectedly while the agent was last known to be working or waiting for input. This covers closed kitty windows/tabs and closed session sockets. Intentional API deletes still emit `post_kill_terminal` instead.
+
+| Field             | Description                                            |
+|-------------------|--------------------------------------------------------|
+| `terminal_id`     | Unique terminal identifier                             |
+| `agent_name`      | Name of the agent profile that was running             |
+| `provider`        | CLI provider (e.g. `claude_code`, `kiro_cli`)          |
+| `reason`          | `window_closed` or `session_closed`                    |
+| `previous_status` | Last observed active status before the terminal closed |
+| `session_id`      | Session the terminal belonged to                       |
+| `timestamp`       | UTC timestamp of the event                             |
+
+Example use: notify a supervisor that work was interrupted before a result was produced.
 
 ## Authoring a plugin
 

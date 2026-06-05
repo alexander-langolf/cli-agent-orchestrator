@@ -19,7 +19,7 @@ Requires:
     cao install examples/cross-provider/data_analyst_gemini_cli.md
     cao install examples/cross-provider/data_analyst_kiro_cli.md
 - Authenticated CLI tools for each provider used in the test
-- Zellij
+- kitty
 
 Run:
     uv run pytest -m e2e test/e2e/test_cross_provider.py -v -o "addopts="

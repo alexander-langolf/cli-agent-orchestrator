@@ -273,7 +273,7 @@ def get_terminal_metadata(terminal_id: str) -> Optional[Dict[str, Any]]:
 
 
 def list_terminals_by_session(tmux_session: str) -> List[Dict[str, Any]]:
-    """List all terminals in a tmux session."""
+    """List all terminals in a kitty session."""
     with SessionLocal() as db:
         terminals = db.query(TerminalModel).filter(TerminalModel.tmux_session == tmux_session).all()
         return [

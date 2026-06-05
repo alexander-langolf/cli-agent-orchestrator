@@ -1,15 +1,9 @@
 """Single FastAPI entry point for all HTTP routes."""
 
 import asyncio
-import fcntl
 import json
 import logging
 import os
-import pty
-import signal
-import struct
-import subprocess
-import termios
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Dict, List, Optional, cast
@@ -36,6 +30,7 @@ from cli_agent_orchestrator.clients.database import (
     get_terminal_metadata,
     init_db,
 )
+from cli_agent_orchestrator.clients.tmux import tmux_client
 from cli_agent_orchestrator.constants import (
     ALLOWED_HOSTS,
     CAO_HOME_DIR,
@@ -45,6 +40,7 @@ from cli_agent_orchestrator.constants import (
     SERVER_HOST,
     SERVER_PORT,
     SERVER_VERSION,
+    TERMINAL_INTERRUPT_MONITOR_INTERVAL,
     TERMINAL_LOG_DIR,
     WS_ALLOWED_CLIENTS,
     add_local_cors_origins,
@@ -109,6 +105,17 @@ async def opencode_inbox_delivery_daemon(registry: PluginRegistry) -> None:
             await asyncio.to_thread(inbox_service.poll_opencode_pending_messages, registry)
         except Exception:
             logger.exception("OpenCode inbox delivery poller error")
+
+
+async def terminal_interruption_daemon(registry: PluginRegistry) -> None:
+    """Background task to detect unexpectedly closed active agent terminals."""
+    logger.info("Terminal interruption monitor started")
+    while True:
+        await asyncio.sleep(TERMINAL_INTERRUPT_MONITOR_INTERVAL)
+        try:
+            await asyncio.to_thread(terminal_service.monitor_terminal_interruptions, registry)
+        except Exception:
+            logger.exception("Terminal interruption monitor error")
 
 
 # Response Models
@@ -183,6 +190,9 @@ async def lifespan(app: FastAPI):
     # provider-specific wakeup path with a unified delivery engine.
     opencode_inbox_task = asyncio.create_task(opencode_inbox_delivery_daemon(registry))
 
+    # Start terminal interruption monitor.
+    terminal_interrupt_task = asyncio.create_task(terminal_interruption_daemon(registry))
+
     # Start inbox watcher
     inbox_observer = PollingObserver(timeout=INBOX_POLLING_INTERVAL)
     inbox_observer.schedule(LogFileHandler(registry), str(TERMINAL_LOG_DIR), recursive=False)
@@ -210,6 +220,13 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
+    # Cancel terminal interruption monitor on shutdown
+    terminal_interrupt_task.cancel()
+    try:
+        await terminal_interrupt_task
+    except asyncio.CancelledError:
+        pass
+
     await registry.teardown()
     logger.info("Shutting down CLI Agent Orchestrator server...")
 
@@ -218,29 +235,6 @@ def get_plugin_registry(request: Request) -> PluginRegistry:
     """Return the plugin registry stored on the FastAPI application state."""
 
     return cast(PluginRegistry, request.app.state.plugin_registry)
-
-
-# Values that indicate ``TERM`` is effectively unusable and must be overridden
-# rather than inherited by the tmux attach subprocess. ``dumb`` is the common
-# fallback that containers and devcontainers ship with when no real terminal
-# is attached. Empty string and missing key behave the same way.
-_UNUSABLE_TERM_VALUES = frozenset({"", "dumb"})
-_DEFAULT_PTY_TERM = "xterm-256color"
-
-
-def _build_pty_env() -> Dict[str, str]:
-    """Build the env handed to the tmux PTY attach subprocess.
-
-    Copies the parent process environment so cao-server's normal config
-    (PATH, HOME, AWS_*, etc.) reaches tmux, and forces ``TERM`` to a usable
-    value when the inherited one would break terminal rendering. Explicit
-    non-dumb ``TERM`` values from the operator are preserved verbatim. See
-    issue #150.
-    """
-    env = os.environ.copy()
-    if env.get("TERM", "") in _UNUSABLE_TERM_VALUES:
-        env["TERM"] = _DEFAULT_PTY_TERM
-    return env
 
 
 app = FastAPI(
@@ -424,7 +418,7 @@ async def create_session(
     """Create a new session with exactly one terminal.
 
     When ``memory_manager`` is truthy, a sidecar ``memory_manager`` terminal is
-    spawned asynchronously in the same tmux session — provider initialization
+    spawned asynchronously in the same kitty session - provider initialization
     can take 15-30s and would otherwise block the HTTP response past the
     client's request timeout. The worker's first message may arrive before
     the curator reaches IDLE; ``get_curated_memory_context`` falls back to
@@ -710,9 +704,9 @@ async def exit_terminal(terminal_id: TerminalId) -> Dict:
         if provider is None:
             raise ValueError(f"Provider not found for terminal {terminal_id}")
         exit_command = provider.exit_cli()
-        # Some providers use tmux key sequences (e.g., "C-d" for Ctrl+D) instead
+        # Some providers use terminal key sequences (e.g., "C-d" for Ctrl+D) instead
         # of text commands (e.g., "/exit"). Key sequences must be sent via
-        # send_special_key() to be interpreted by tmux, not as literal text.
+        # send_special_key() to be interpreted by kitty, not as literal text.
         if exit_command.startswith(("C-", "M-")):
             terminal_service.send_special_key(terminal_id, exit_command)
         else:
@@ -849,11 +843,12 @@ async def get_inbox_messages_endpoint(
 
 @app.websocket("/terminals/{terminal_id}/ws")
 async def terminal_ws(websocket: WebSocket, terminal_id: str):
-    """WebSocket endpoint for live terminal streaming via tmux attach.
+    """WebSocket endpoint for live terminal streaming.
 
-    Security: This endpoint provides full PTY access with no authentication.
-    It is intended for localhost-only use. Do NOT expose the server to
-    untrusted networks (e.g. --host 0.0.0.0) without adding authentication.
+    Security: this endpoint forwards input to running kitty windows with no
+    authentication. It is intended for localhost-only use. Do NOT expose the
+    server to untrusted networks (e.g. --host 0.0.0.0) without adding
+    authentication.
     """
     # Reject connections from clients outside the configured allowlist.
     # Defaults to loopback; operators running cao-server inside a container can
@@ -872,110 +867,73 @@ async def terminal_ws(websocket: WebSocket, terminal_id: str):
         return
 
     # Defence-in-depth: re-validate the names from the DB before they
-    # flow into a tmux subprocess argument. The POST /sessions handler
+    # flow into a kitty remote-control subprocess argument. The POST /sessions handler
     # now validates user-supplied session_name, but pre-existing rows
-    # or future code paths could still bypass that, and tmux parses
-    # ':' / '.' as target delimiters. Bind the validator return values
+    # or future code paths could still bypass that, and kitty match
+    # expressions use punctuation as syntax. Bind the validator return values
     # so the sanitization is explicit at the actual sink below.
     try:
         session_name = validate_tmux_name(metadata["tmux_session"], "session_name")
         window_name = validate_tmux_name(metadata["tmux_window"], "window_name")
     except ValueError:
-        await websocket.close(code=4003, reason="Invalid tmux target name")
+        await websocket.close(code=4003, reason="Invalid kitty target name")
         return
 
-    # Create PTY pair for tmux attach
-    master_fd, slave_fd = pty.openpty()
-
-    # Set initial terminal size
-    winsize = struct.pack("HHHH", 24, 80, 0, 0)
-    fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, winsize)
-
-    # Start tmux attach inside the PTY.
-    # Container/devcontainer environments often leave TERM unset or set to
-    # ``dumb``, which strips colours, breaks cursor positioning and corrupts
-    # the Ink-based TUIs that agent CLIs render. Force a sane default so the
-    # browser-side xterm.js renderer sees the escape sequences it expects.
-    # Any explicit non-dumb TERM the operator set is preserved.
-    pty_env = _build_pty_env()
-    proc = subprocess.Popen(
-        ["tmux", "-u", "attach-session", "-t", f"{session_name}:{window_name}"],
-        stdin=slave_fd,
-        stdout=slave_fd,
-        stderr=slave_fd,
-        close_fds=True,
-        preexec_fn=os.setsid,
-        env=pty_env,
-    )
-    os.close(slave_fd)
-
-    # Make master_fd non-blocking for event-driven reads
-    flag = fcntl.fcntl(master_fd, fcntl.F_GETFL)
-    fcntl.fcntl(master_fd, fcntl.F_SETFL, flag | os.O_NONBLOCK)
-
-    loop = asyncio.get_event_loop()
-    output_queue: asyncio.Queue[bytes] = asyncio.Queue()
     done = asyncio.Event()
+    last_output = ""
 
-    def _on_pty_data():
-        """Callback when PTY has data available."""
-        try:
-            data = os.read(master_fd, 65536)
-            if data:
-                output_queue.put_nowait(data)
-            else:
-                done.set()
-        except BlockingIOError:
-            pass
-        except OSError:
-            done.set()
-
-    loop.add_reader(master_fd, _on_pty_data)
+    async def _send_output_delta(output: str) -> None:
+        nonlocal last_output
+        if output == last_output:
+            return
+        if last_output and output.startswith(last_output):
+            chunk = output[len(last_output) :]
+        else:
+            chunk = output
+        last_output = output
+        if chunk:
+            await websocket.send_bytes(chunk.encode())
 
     async def _forward_output():
-        """Read from PTY queue and send to WebSocket."""
+        """Poll kitty scrollback and stream deltas to the WebSocket."""
         while not done.is_set():
             try:
-                data = await asyncio.wait_for(output_queue.get(), timeout=1.0)
-                # Drain any additional pending data for batching
-                while not output_queue.empty():
-                    try:
-                        data += output_queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
-                await websocket.send_bytes(data)
+                output = await asyncio.to_thread(
+                    tmux_client.get_history,
+                    session_name,
+                    window_name,
+                    None,
+                    False,
+                    True,
+                )
+                await _send_output_delta(output)
+                await asyncio.wait_for(done.wait(), timeout=0.25)
             except asyncio.TimeoutError:
-                if proc.poll() is not None:
-                    break
+                continue
             except (Exception, asyncio.CancelledError):
                 break
 
     async def _forward_input():
-        """Receive from WebSocket and write to PTY."""
+        """Receive browser input and forward it to kitty."""
         try:
             while not done.is_set():
                 msg = await websocket.receive_text()
                 payload = json.loads(msg)
                 if payload.get("type") == "input":
-                    raw = payload["data"].encode()
-                    # Write in chunks to avoid overflowing the PTY buffer
-                    chunk_size = 1024
-                    for i in range(0, len(raw), chunk_size):
-                        os.write(master_fd, raw[i : i + chunk_size])
-                        if i + chunk_size < len(raw):
-                            await asyncio.sleep(0.01)
+                    await asyncio.to_thread(
+                        tmux_client.send_literal_keys,
+                        session_name,
+                        window_name,
+                        payload["data"],
+                    )
                 elif payload.get("type") == "resize":
-                    rows = payload.get("rows", 24)
-                    cols = payload.get("cols", 80)
-                    winsize_data = struct.pack("HHHH", rows, cols, 0, 0)
-                    fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize_data)
-                    # Explicitly notify tmux of the size change —
-                    # TIOCSWINSZ on the master doesn't always deliver
-                    # SIGWINCH to the child process group.
-                    try:
-                        os.kill(proc.pid, signal.SIGWINCH)
-                    except OSError:
-                        pass
+                    logger.debug(
+                        "Ignoring browser resize for kitty terminal %s/%s: %sx%s",
+                        session_name,
+                        window_name,
+                        payload.get("cols", 80),
+                        payload.get("rows", 24),
+                    )
         except WebSocketDisconnect:
             pass
         except (Exception, asyncio.CancelledError):
@@ -989,21 +947,6 @@ async def terminal_ws(websocket: WebSocket, terminal_id: str):
         pass
     finally:
         done.set()
-        try:
-            loop.remove_reader(master_fd)
-        except Exception:
-            pass
-        try:
-            os.close(master_fd)
-        except OSError:
-            pass
-        # Terminate tmux attach (just detaches, doesn't kill the session)
-        proc.terminate()
-        try:
-            await asyncio.wait_for(asyncio.to_thread(proc.wait), timeout=3.0)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await asyncio.to_thread(proc.wait)
 
 
 # ── Flow management endpoints ────────────────────────────────────────

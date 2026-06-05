@@ -7,17 +7,17 @@ Architecture:
 - Messages are queued in the database (inbox table) via send_message MCP tool
 - LogFileHandler monitors terminal log files for changes using watchdog
 - When a terminal becomes idle (detected via log patterns), pending messages are delivered
-- Messages are sent via terminal_service.send_input() which types into the Zellij pane
+- Messages are sent via terminal_service.send_input() which types into the kitty window
 
 Message Flow:
 1. Agent A calls send_message(terminal_id, message) → message queued in DB
-2. Agent B's terminal log file updates (via Zellij subscribe)
+2. Agent B's terminal output changes and status checks observe the update
 3. LogFileHandler.on_modified() triggered → checks for pending messages
 4. If terminal is IDLE and has pending messages → deliver via send_input()
 5. Message status updated to DELIVERED or FAILED
 
 Performance Optimization:
-- Uses fast log tail check before expensive Zellij status queries
+- Uses fast log tail check before expensive terminal status queries
 - Only queries full provider status when idle pattern detected in log
 """
 
@@ -62,7 +62,7 @@ def _get_log_tail(terminal_id: str, lines: int = 100) -> str:
 
 
 def _has_idle_pattern(terminal_id: str) -> bool:
-    """Check if log tail contains idle pattern without expensive Zellij calls."""
+    """Check if log tail contains idle pattern without expensive tmux calls."""
     tail = _get_log_tail(terminal_id)
     if not tail:
         return False
@@ -147,7 +147,7 @@ def poll_opencode_pending_messages(registry: PluginRegistry | None = None) -> No
     """Poll OpenCode terminals for pending inbox messages.
 
     This is a temporary OpenCode-specific wakeup path for providers whose
-    pipe-pane logs do not change after the TUI settles. It intentionally reuses
+    terminal logs do not change after the TUI settles. It intentionally reuses
     the existing delivery helper and inherits its known duplicate-wakeup race
     with immediate and watchdog delivery paths. GH #115 tracks replacing these
     paths with a single coordinated delivery engine.

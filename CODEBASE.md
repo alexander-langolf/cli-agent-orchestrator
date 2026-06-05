@@ -33,14 +33,14 @@
            ┌────▼────┐               ┌────▼─────┐
            │ Clients │               │Providers │
            ├─────────┤               ├──────────┤
-           │ • Zellij  │               │ • kiro   │
+           │ • tmux  │               │ • kiro   │
            │ • db    │               │   _cli   │
            └────┬────┘               │ • q_cli  │
                 │                    │ • claude │
          ┌──────┴──────┐             │   _code  │
          │             │             │ • codex  │
     ┌────▼────┐  ┌─────▼─────┐      │          │
-    │  Zellij   │  │  SQLite   │      │          │
+    │  Tmux   │  │  SQLite   │      │          │
     │ Sessions│  │  Database │      │          │
     └─────────┘  └───────────┘      └────┬─────┘
                                          │
@@ -74,7 +74,7 @@ src/cli_agent_orchestrator/
 │   ├── inbox_service.py   # Terminal-to-terminal messaging with watchdog
 │   └── flow_service.py    # Scheduled flow execution
 ├── clients/               # Client Layer: External systems
-│   ├── zellij.py          # Zellij operations (sets CAO_TERMINAL_ID, send_keys, send_keys_via_paste for bracketed paste)
+│   ├── tmux.py            # Tmux operations (sets CAO_TERMINAL_ID, send_keys, send_keys_via_paste for bracketed paste)
 │   └── database.py        # SQLite with terminals & inbox_messages tables
 ├── providers/             # Provider Layer: CLI tool integration
 │   ├── base.py            # Abstract provider interface (mark_input_received hook)
@@ -109,7 +109,7 @@ cao launch --agents code_sup
   ↓
 terminal_service.create_terminal()
   ↓
-Zellij_client.create_session(terminal_id)  # Sets CAO_TERMINAL_ID
+tmux_client.create_session(terminal_id)  # Sets CAO_TERMINAL_ID
   ↓
 database.create_terminal()
   ↓

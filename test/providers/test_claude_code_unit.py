@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, mock_open, patch
+from unittest.mock import MagicMock, call, mock_open, patch
 
 import pytest
 
@@ -813,17 +813,11 @@ class TestClaudeCodeProviderStartupPrompts:
         mock_tmux.get_history.return_value = (
             "\x1b[1m❯\x1b[0m 1. Yes, I trust this folder\n  2. No, don't trust\n"
         )
-        mock_session = MagicMock()
-        mock_window = MagicMock()
-        mock_pane = MagicMock()
-        mock_tmux.server.sessions.get.return_value = mock_session
-        mock_session.windows.get.return_value = mock_window
-        mock_window.active_pane = mock_pane
 
         provider = ClaudeCodeProvider("test123", "test-session", "window-0")
         provider._handle_startup_prompts(timeout=2.0)
 
-        mock_pane.send_keys.assert_called_once_with("", enter=True)
+        mock_tmux.send_special_key.assert_called_once_with("test-session", "window-0", "Enter")
 
     @patch("cli_agent_orchestrator.providers.claude_code.tmux_client")
     def test_handle_startup_prompts_not_needed(self, mock_tmux):
@@ -855,21 +849,14 @@ class TestClaudeCodeProviderStartupPrompts:
             "",
             "❯ 1. Yes, I trust this folder\n  2. No",
         ]
-        mock_session = MagicMock()
-        mock_window = MagicMock()
-        mock_pane = MagicMock()
-        mock_tmux.server.sessions.get.return_value = mock_session
-        mock_session.windows.get.return_value = mock_window
-        mock_window.active_pane = mock_pane
 
         provider = ClaudeCodeProvider("test123", "test-session", "window-0")
         provider._handle_startup_prompts(timeout=5.0)
 
-        mock_pane.send_keys.assert_called_once_with("", enter=True)
+        mock_tmux.send_special_key.assert_called_once_with("test-session", "window-0", "Enter")
 
-    @patch("cli_agent_orchestrator.providers.claude_code.subprocess")
     @patch("cli_agent_orchestrator.providers.claude_code.tmux_client")
-    def test_handle_bypass_prompt_detected_and_accepted(self, mock_tmux, mock_subprocess):
+    def test_handle_bypass_prompt_detected_and_accepted(self, mock_tmux):
         """Test that bypass permissions prompt is detected and auto-accepted."""
         # First poll: bypass prompt; second poll: welcome banner (after dismissal)
         mock_tmux.get_history.side_effect = [
@@ -881,53 +868,29 @@ class TestClaudeCodeProviderStartupPrompts:
         provider = ClaudeCodeProvider("test123", "test-session", "window-0")
         provider._handle_startup_prompts(timeout=5.0)
 
-        # Verify raw Down arrow escape sequence + Enter was sent via subprocess
-        calls = mock_subprocess.run.call_args_list
-        assert len(calls) == 2
-        assert calls[0].args[0] == [
-            "tmux",
-            "send-keys",
-            "-t",
-            "test-session:window-0",
-            "-l",
-            "\x1b[B",
-        ]
-        assert calls[1].args[0] == ["tmux", "send-keys", "-t", "test-session:window-0", "Enter"]
+        mock_tmux.send_literal_keys.assert_called_once_with(
+            "test-session", "window-0", "\x1b[B"
+        )
+        mock_tmux.send_special_key.assert_called_once_with("test-session", "window-0", "Enter")
 
-    @patch("cli_agent_orchestrator.providers.claude_code.subprocess")
     @patch("cli_agent_orchestrator.providers.claude_code.tmux_client")
-    def test_handle_bypass_then_trust_prompt(self, mock_tmux, mock_subprocess):
+    def test_handle_bypass_then_trust_prompt(self, mock_tmux):
         """Test that bypass prompt is handled, then trust prompt follows."""
         # Poll 1: bypass prompt; Poll 2: trust prompt (after bypass dismissed)
         mock_tmux.get_history.side_effect = [
             "WARNING: Bypass Permissions mode\n❯ 1. No, exit\n  2. Yes, I accept\n",
             "❯ 1. Yes, I trust this folder\n  2. No",
         ]
-        mock_session = MagicMock()
-        mock_window = MagicMock()
-        mock_pane = MagicMock()
-        mock_tmux.server.sessions.get.return_value = mock_session
-        mock_session.windows.get.return_value = mock_window
-        mock_window.active_pane = mock_pane
-
         provider = ClaudeCodeProvider("test123", "test-session", "window-0")
         provider._handle_startup_prompts(timeout=5.0)
 
-        # Bypass: 2 subprocess calls (Down + Enter), then trust: 1 pane.send_keys call
-        sub_calls = mock_subprocess.run.call_args_list
-        assert len(sub_calls) == 2
-        assert sub_calls[0].args[0] == [
-            "tmux",
-            "send-keys",
-            "-t",
-            "test-session:window-0",
-            "-l",
-            "\x1b[B",
+        mock_tmux.send_literal_keys.assert_called_once_with(
+            "test-session", "window-0", "\x1b[B"
+        )
+        assert mock_tmux.send_special_key.call_args_list == [
+            call("test-session", "window-0", "Enter"),
+            call("test-session", "window-0", "Enter"),
         ]
-        pane_calls = mock_pane.send_keys.call_args_list
-        assert len(pane_calls) == 1
-        assert pane_calls[0].args == ("",)
-        assert pane_calls[0].kwargs == {"enter": True}
 
     @patch("cli_agent_orchestrator.providers.claude_code.tmux_client")
     def test_get_status_trust_prompt_not_waiting_user_answer(self, mock_tmux):
@@ -970,19 +933,13 @@ class TestClaudeCodeProviderStartupPrompts:
         mock_wait_status.return_value = True
         trust_output = "❯ 1. Yes, I trust this folder\n  2. No"
         mock_tmux.get_history.side_effect = ["", trust_output, trust_output]
-        mock_session = MagicMock()
-        mock_window = MagicMock()
-        mock_pane = MagicMock()
-        mock_tmux.server.sessions.get.return_value = mock_session
-        mock_session.windows.get.return_value = mock_window
-        mock_window.active_pane = mock_pane
 
         provider = ClaudeCodeProvider("test123", "test-session", "window-0")
         with patch.object(provider, "get_status", return_value=TerminalStatus.IDLE):
             result = provider.initialize()
 
         assert result is True
-        mock_pane.send_keys.assert_called_with("", enter=True)
+        mock_tmux.send_special_key.assert_called_with("test-session", "window-0", "Enter")
 
 
 class TestClaudeCodeProviderSettings:

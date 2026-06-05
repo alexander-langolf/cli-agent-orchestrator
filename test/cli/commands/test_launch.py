@@ -183,7 +183,7 @@ def test_launch_generic_exception():
 
 
 def test_launch_headless_mode():
-    """Test launch in headless mode doesn't attach to Zellij."""
+    """Test launch in headless mode does not focus kitty."""
     runner = CliRunner()
 
     with (
@@ -204,7 +204,7 @@ def test_launch_headless_mode():
 
 
 def test_launch_non_headless_waits_for_idle_before_attach():
-    """Non-headless launch must wait for IDLE/COMPLETED before tmux attach.
+    """Non-headless launch must wait for IDLE/COMPLETED before kitty focus.
 
     Regression guard for #220: attaching before the TUI finishes initializing
     races with input-handler wiring and silently drops keystrokes. The wait
@@ -246,10 +246,10 @@ def test_launch_non_headless_waits_for_idle_before_attach():
 
 
 def test_launch_non_headless_attaches_even_if_wait_times_out():
-    """Non-headless launch warns but still attaches if the idle wait times out.
+    """Non-headless launch warns but still focuses kitty if the idle wait times out.
 
-    The wait is advisory: orphaning the session in Zellij (by refusing to attach)
-    would be worse than letting the user inspect a slow-initializing session.
+    The wait is advisory: refusing to focus the session would be worse than
+    letting the user inspect a slow-initializing session.
     """
     runner = CliRunner()
 
@@ -272,7 +272,10 @@ def test_launch_non_headless_attaches_even_if_wait_times_out():
         assert "did not reach idle within 120s" in result.output
         mock_subprocess.assert_called_once()
         attach_cmd = mock_subprocess.call_args.args[0]
-        assert attach_cmd[:2] == ["zellij", "attach"]
+        assert attach_cmd[:3] == ["kitten", "@", "--to"]
+        assert attach_cmd[3].startswith("unix:")
+        assert attach_cmd[3].endswith("/test-session.sock")
+        assert attach_cmd[-2:] == ["--match", "env:CAO_SESSION_NAME=test-session"]
 
 
 def test_launch_workspace_confirmation_accepted():
@@ -780,7 +783,7 @@ class TestParseEnvPairs:
     def test_allowlisted_claude_auth_var_passes(self):
         # The 6 CLAUDE_CODE_USE_* / SKIP_* auth vars are explicitly allowed
         # through despite matching the CLAUDE prefix — same allowlist as
-        # TmuxClient inherits at the server boundary.
+        # KittyClient inherits at the server boundary.
         assert _parse_env_pairs(["CLAUDE_CODE_USE_BEDROCK=1"]) == {"CLAUDE_CODE_USE_BEDROCK": "1"}
 
     def test_value_at_cap_rejected(self):

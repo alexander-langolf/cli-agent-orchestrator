@@ -7,7 +7,7 @@ This guide covers setting up your development environment and running tests for 
 - Python 3.10 or higher
 - [uv](https://docs.astral.sh/uv/) - Fast Python package installer and resolver
 - Git
-- tmux 3.2+ (for running the orchestrator and integration tests)
+- rmux (for running the orchestrator and integration tests)
 
 ## Getting Started
 
@@ -102,7 +102,7 @@ uv run pytest test/providers/ -m "not integration" -v
 
 ### E2E Tests
 
-E2E tests require a running CAO server, authenticated CLI tools, and tmux:
+E2E tests require a running CAO server, authenticated CLI tools, and rmux:
 
 ```bash
 # Run all E2E tests
@@ -364,7 +364,7 @@ cli-agent-orchestrator/
 │   └── cli_agent_orchestrator/     # Main source code
 │       ├── api/                    # FastAPI server
 │       ├── cli/                    # CLI commands
-│       ├── clients/                # Database and tmux clients
+│       ├── clients/                # Database and rmux clients
 │       ├── mcp_server/             # MCP server implementation
 │       ├── models/                 # Data models
 │       ├── providers/              # Agent providers (Kiro CLI, Claude Code, Codex, Gemini, Kimi, Copilot, OpenCode, Q CLI [deprecated])
@@ -373,7 +373,7 @@ cli-agent-orchestrator/
 ├── test/                           # Test suite (511 tests, 84% coverage)
 │   ├── api/                       # API endpoint tests
 │   ├── cli/                       # CLI command tests
-│   ├── clients/                   # Client tests (database, tmux)
+│   ├── clients/                   # Client tests (database, rmux)
 │   ├── e2e/                       # End-to-end tests (require running CAO server)
 │   ├── mcp_server/                # MCP server tests
 │   ├── models/                    # Data model tests

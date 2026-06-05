@@ -35,11 +35,8 @@ export interface SessionDetail {
 
 export interface TerminalMeta {
   id: string
-  session_name: string
-  name: string
-  zellij_tab_id: number | null
-  zellij_pane_id: number | null
-  launch_working_directory: string | null
+  tmux_session: string
+  tmux_window: string
   provider: string
   agent_profile: string | null
   created_at: string | null

@@ -28,8 +28,8 @@ class ProviderManager:
         self,
         provider_type: str,
         terminal_id: str,
-        session_name: str,
-        terminal_name: str,
+        tmux_session: str,
+        tmux_window: str,
         agent_profile: Optional[str] = None,
         allowed_tools: Optional[List[str]] = None,
         skill_prompt: Optional[str] = None,
@@ -43,8 +43,8 @@ class ProviderManager:
                     raise ValueError("Q CLI provider requires agent_profile parameter")
                 provider = QCliProvider(
                     terminal_id,
-                    session_name,
-                    terminal_name,
+                    tmux_session,
+                    tmux_window,
                     agent_profile,
                     allowed_tools,
                 )
@@ -53,16 +53,16 @@ class ProviderManager:
                     raise ValueError("Kiro CLI provider requires agent_profile parameter")
                 provider = KiroCliProvider(
                     terminal_id,
-                    session_name,
-                    terminal_name,
+                    tmux_session,
+                    tmux_window,
                     agent_profile,
                     allowed_tools,
                 )
             elif provider_type == ProviderType.CLAUDE_CODE.value:
                 provider = ClaudeCodeProvider(
                     terminal_id,
-                    session_name,
-                    terminal_name,
+                    tmux_session,
+                    tmux_window,
                     agent_profile,
                     allowed_tools,
                     skill_prompt=skill_prompt,
@@ -70,8 +70,8 @@ class ProviderManager:
             elif provider_type == ProviderType.CODEX.value:
                 provider = CodexProvider(
                     terminal_id,
-                    session_name,
-                    terminal_name,
+                    tmux_session,
+                    tmux_window,
                     agent_profile,
                     allowed_tools,
                     skill_prompt=skill_prompt,
@@ -79,8 +79,8 @@ class ProviderManager:
             elif provider_type == ProviderType.COPILOT_CLI.value:
                 provider = CopilotCliProvider(
                     terminal_id,
-                    session_name,
-                    terminal_name,
+                    tmux_session,
+                    tmux_window,
                     agent_profile,
                     allowed_tools,
                     model=model,
@@ -88,8 +88,8 @@ class ProviderManager:
             elif provider_type == ProviderType.GEMINI_CLI.value:
                 provider = GeminiCliProvider(
                     terminal_id,
-                    session_name,
-                    terminal_name,
+                    tmux_session,
+                    tmux_window,
                     agent_profile,
                     allowed_tools,
                     skill_prompt=skill_prompt,
@@ -97,8 +97,8 @@ class ProviderManager:
             elif provider_type == ProviderType.KIMI_CLI.value:
                 provider = KimiCliProvider(
                     terminal_id,
-                    session_name,
-                    terminal_name,
+                    tmux_session,
+                    tmux_window,
                     agent_profile,
                     allowed_tools,
                     skill_prompt=skill_prompt,
@@ -106,8 +106,8 @@ class ProviderManager:
             elif provider_type == ProviderType.OPENCODE_CLI.value:
                 provider = OpenCodeCliProvider(
                     terminal_id,
-                    session_name,
-                    terminal_name,
+                    tmux_session,
+                    tmux_window,
                     agent_profile,
                     allowed_tools,
                     model=model,
@@ -152,8 +152,8 @@ class ProviderManager:
         provider = self.create_provider(
             metadata["provider"],
             terminal_id,
-            metadata["session_name"],
-            metadata["terminal_name"],
+            metadata["tmux_session"],
+            metadata["tmux_window"],
             metadata["agent_profile"],
         )
         # Restore shell_command baseline from DB so get_status() can detect kiro exit.

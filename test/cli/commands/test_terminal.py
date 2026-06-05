@@ -204,7 +204,7 @@ class TestRestoreCommand:
         assert "Failed to read snapshot" in result.output
 
     def test_restore_create_window_exception(self, runner, tmp_path):
-        """Fails with clear error when tmux window creation fails."""
+        """Fails with clear error when kitty window creation fails."""
         snapshot = {
             "terminal_id": "abc12345",
             "session_name": "cao-test",
@@ -220,7 +220,7 @@ class TestRestoreCommand:
         mock_resp.status_code = 200
         mock_resp.raise_for_status = MagicMock()
         mock_tmux = MagicMock()
-        mock_tmux.create_window.side_effect = Exception("tmux session gone")
+        mock_tmux.create_window.side_effect = Exception("kitty session gone")
 
         with patch("cli_agent_orchestrator.cli.commands.terminal.TERMINAL_LOG_DIR", tmp_path):
             with patch(

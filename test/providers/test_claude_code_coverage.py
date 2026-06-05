@@ -14,7 +14,7 @@ import pytest
 @pytest.fixture
 def provider():
     """Create a ClaudeCodeProvider with mocked dependencies."""
-    with patch("cli_agent_orchestrator.providers.claude_code.zellij_client"):
+    with patch("cli_agent_orchestrator.providers.claude_code.tmux_client"):
         from cli_agent_orchestrator.providers.claude_code import ClaudeCodeProvider
 
         p = ClaudeCodeProvider("tid1", "ses", "win", "test-agent")
@@ -51,46 +51,45 @@ class TestBuildCommandMcpServerModelDump:
 class TestHandleStartupPromptsBranches:
     """Test _handle_startup_prompts branches."""
 
-    @patch("cli_agent_orchestrator.providers.claude_code.zellij_client")
-    def test_bypass_permissions_prompt(self, mock_Zellij, provider):
+    @patch("cli_agent_orchestrator.providers.claude_code.tmux_client")
+    def test_bypass_permissions_prompt(self, mock_tmux, provider):
         """Detects bypass permissions prompt and sends Down + Enter."""
-        mock_Zellij.get_history.return_value = (
+        mock_tmux.get_history.return_value = (
             "⚠ Bypass Permissions mode\n" "1. No, exit\n" "2. Yes, I accept\n"
         )
 
         provider._handle_startup_prompts(timeout=1.0)
 
-        mock_Zellij.send_raw_bytes.assert_called_once_with("ses", "win", b"\x1b[B")
-        mock_Zellij.send_special_key.assert_called_once_with("ses", "win", "Enter")
+        mock_tmux.send_literal_keys.assert_called_once_with("ses", "win", "\x1b[B")
+        mock_tmux.send_special_key.assert_called_once_with("ses", "win", "Enter")
 
-    @patch("cli_agent_orchestrator.providers.claude_code.zellij_client")
-    def test_idle_prompt_detected_early_return(self, mock_Zellij, provider):
+    @patch("cli_agent_orchestrator.providers.claude_code.tmux_client")
+    def test_idle_prompt_detected_early_return(self, mock_tmux, provider):
         """When idle prompt is visible, returns immediately without sending keys."""
         from cli_agent_orchestrator.providers.claude_code import IDLE_PROMPT_PATTERN
 
-        mock_Zellij.get_history.return_value = "❯ "
+        mock_tmux.get_history.return_value = "❯ "
 
         provider._handle_startup_prompts(timeout=1.0)
 
         # No exception means early return worked
 
-    @patch("cli_agent_orchestrator.providers.claude_code.zellij_client")
-    def test_welcome_banner_detected_early_return(self, mock_Zellij, provider):
+    @patch("cli_agent_orchestrator.providers.claude_code.tmux_client")
+    def test_welcome_banner_detected_early_return(self, mock_tmux, provider):
         """When welcome banner is visible, returns immediately."""
-        mock_Zellij.get_history.return_value = "Welcome to Claude Code v2.5.0"
+        mock_tmux.get_history.return_value = "Welcome to Claude Code v2.5.0"
 
         provider._handle_startup_prompts(timeout=1.0)
 
-    @patch("cli_agent_orchestrator.providers.claude_code.zellij_client")
-    def test_trust_prompt_detected(self, mock_Zellij, provider):
+    @patch("cli_agent_orchestrator.providers.claude_code.tmux_client")
+    def test_trust_prompt_detected(self, mock_tmux, provider):
         """Trust prompt sends Enter to accept."""
-        mock_Zellij.get_history.return_value = (
+        mock_tmux.get_history.return_value = (
             "Do you trust the files in this folder?\n" "❯ Yes, I trust this folder"
         )
-
         provider._handle_startup_prompts(timeout=1.0)
 
-        mock_Zellij.send_special_key.assert_called_once_with("ses", "win", "Enter")
+        mock_tmux.send_special_key.assert_called_once_with("ses", "win", "Enter")
 
 
 class TestDatabaseListAllTerminals:
@@ -102,8 +101,8 @@ class TestDatabaseListAllTerminals:
 
         mock_terminal = MagicMock()
         mock_terminal.id = "tid1"
-        mock_terminal.session_name = "ses"
-        mock_terminal.terminal_name = "win"
+        mock_terminal.tmux_session = "ses"
+        mock_terminal.tmux_window = "win"
         mock_terminal.provider = "kiro_cli"
         mock_terminal.agent_profile = "dev"
         mock_terminal.last_active = None

@@ -4,11 +4,11 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/cli-agent-orchestrator.svg)](https://pypi.org/project/cli-agent-orchestrator/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/awslabs/cli-agent-orchestrator)
 
-**CLI Agent Orchestrator (CAO)** is an open-source multi-agent orchestration framework for AI coding CLIs — Claude Code, Kiro CLI, Codex CLI, Gemini CLI, Kimi CLI, GitHub Copilot CLI, OpenCode, and Amazon Q Developer CLI. CAO runs each agent in an isolated tmux session and coordinates them with a supervisor–worker pattern over the Model Context Protocol (MCP), so one supervisor agent can delegate tasks to multiple specialist agents in parallel, sequentially, or as a swarm.
+**CLI Agent Orchestrator (CAO)** is an open-source multi-agent orchestration framework for AI coding CLIs — Claude Code, Kiro CLI, Codex CLI, Gemini CLI, Kimi CLI, GitHub Copilot CLI, OpenCode, and Amazon Q Developer CLI. CAO runs each agent in an isolated kitty session and coordinates them with a supervisor–worker pattern over the Model Context Protocol (MCP), so one supervisor agent can delegate tasks to multiple specialist agents in parallel, sequentially, or as a swarm.
 
 ## What is CAO?
 
-CAO (pronounced "kay-oh") is a lightweight local orchestrator that sits between you and the CLI coding agents you already use. Instead of running a single agent at a time, CAO lets a supervisor agent launch, message, and coordinate multiple worker agents — each one a real CLI tool (Claude Code, Kiro, Codex, etc.) running in its own tmux terminal. Agents communicate through three MCP-exposed primitives (**handoff**, **assign**, **send_message**) and are managed via a CLI, a bundled Web UI, or an MCP management server. Because every agent is a full CLI process, CAO preserves tool behaviour, auth, and advanced features (Claude Code sub-agents, Q CLI custom agents, etc.) that a raw API wrapper cannot.
+CAO (pronounced "kay-oh") is a lightweight local orchestrator that sits between you and the CLI coding agents you already use. Instead of running a single agent at a time, CAO lets a supervisor agent launch, message, and coordinate multiple worker agents — each one a real CLI tool (Claude Code, Kiro, Codex, etc.) running in its own kitty terminal. Agents communicate through three MCP-exposed primitives (**handoff**, **assign**, **send_message**) and are managed via a CLI, a bundled Web UI, or an MCP management server. Because every agent is a full CLI process, CAO preserves tool behaviour, auth, and advanced features (Claude Code sub-agents, Q CLI custom agents, etc.) that a raw API wrapper cannot.
 
 ## Common use cases
 
@@ -16,19 +16,19 @@ CAO (pronounced "kay-oh") is a lightweight local orchestrator that sits between 
 - **Cross-provider workflows** — supervisor on one CLI (e.g. Kiro), worker on another (e.g. Claude Code), per-profile provider selection.
 - **Scheduled agent runs** — cron-style "every morning at 9am" triggers via [Flows](docs/flows.md).
 - **Headless agent execution in CI** — `cao launch --headless --async` to run tasks unattended.
-- **Multi-agent swarms with HITL** — humans can attach to any tmux session to intervene or steer.
+- **Multi-agent swarms with HITL** — humans can focus any kitty session to intervene or steer.
 - **Agent-driven agent management** — a primary agent uses [`cao-ops-mcp`](#cao-ops-mcp-server) to spawn and monitor CAO sessions from its own chat loop.
 
 ## Hierarchical Multi-Agent System
 
 CAO implements a hierarchical multi-agent system — one supervisor agent delegates to specialised worker agents rather than running everything in a single context.
 
-![CAO architecture: supervisor agent delegating to worker agents in isolated tmux sessions via MCP](./docs/assets/cao_architecture.png)
+![CAO architecture: supervisor agent delegating to worker agents in isolated kitty sessions via MCP](./docs/assets/cao_architecture.png)
 
 ### Key Features
 
 - **Hierarchical supervisor–worker orchestration** — a supervisor agent coordinates and delegates; workers focus on their domain. Preserves overall context without polluting workers.
-- **Session isolation via tmux** — every agent runs in its own tmux session. Clean context separation, real PTY access, humans can `tmux attach` to steer at any time.
+- **Session isolation via kitty** — every agent runs in its own kitty session. Clean context separation, real PTY access, humans can focus CAO-managed kitty windows to steer at any time.
 - **Three orchestration primitives over MCP** — `handoff` (sync, wait for completion), `assign` (async, fire-and-forget), `send_message` (inbox delivery between agents). See [Multi-Agent Orchestration](#multi-agent-orchestration).
 - **Cross-provider mixing** — run workers on different CLIs in the same session. Pin a profile to a provider via agent frontmatter. See [Cross-Provider Orchestration](#cross-provider-orchestration).
 - **Scheduled flows** — cron-like scheduling for unattended agent runs. See [docs/flows.md](docs/flows.md).
@@ -47,7 +47,7 @@ For detailed project structure and architecture, see [CODEBASE.md](CODEBASE.md).
 
 - **curl** and **git** — for downloading installers and cloning the repo
 - **Python 3.10 or higher** — see [pyproject.toml](pyproject.toml)
-- **tmux 3.3+** — used for agent session isolation
+- **[kitty](https://sw.kovidgoyal.net/kitty/binary/)** — used for agent session isolation
 - **[uv](https://docs.astral.sh/uv/)** — fast Python package installer and virtual environment manager
 
 ### 1. Install Python 3.10+
@@ -71,10 +71,10 @@ python3 --version   # 3.10 or higher
 
 > We recommend using [uv](https://docs.astral.sh/uv/) rather than a system-wide Python install like Anaconda. `uv` handles virtual environments and Python version resolution per-project.
 
-### 2. Install tmux (3.3+)
+### 2. Install kitty
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/awslabs/cli-agent-orchestrator/refs/heads/main/tmux-install.sh)
+curl -L https://sw.kovidgoyal.net/kitty/installer.sh | sh /dev/stdin
 ```
 
 ### 3. Install uv
@@ -100,7 +100,7 @@ PyPI publishes tagged releases only, so it will lag behind `main` between releas
 uv tool install cli-agent-orchestrator --upgrade
 
 # Pin a specific release
-uv tool install cli-agent-orchestrator==2.1.0
+uv tool install cli-agent-orchestrator==2.2.0
 ```
 
 For local development (`git clone` + `uv sync`) and the testing/quality workflow, see [DEVELOPMENT.md](DEVELOPMENT.md).
@@ -177,9 +177,9 @@ cao shutdown --all                      # shut down every CAO session
 cao shutdown --session cao-my-session   # shut down a specific session
 ```
 
-### Sessions run in tmux
+### Sessions run in kitty
 
-All agent sessions run in tmux — you can `tmux attach -t <session-name>` to watch agents in real time. For the full list of tmux shortcuts and the interactive window selector, see [docs/tmux.md](docs/tmux.md).
+All agent sessions run in kitty. CAO creates one remote-control socket per session under `~/.aws/cli-agent-orchestrator/kitty/`, and non-headless launches focus the session window automatically. For manual commands, see [docs/kitty.md](docs/kitty.md).
 
 ## Web UI
 
@@ -371,7 +371,7 @@ Plugins are observer-only Python extensions that react to server-side events ins
 
 ## Security
 
-`cao-server` is designed for **localhost-only use**. The WebSocket terminal endpoint (`/terminals/{id}/ws`) provides full PTY access and rejects non-loopback connections. Do not expose the server to untrusted networks without adding authentication.
+`cao-server` is designed for **localhost-only use**. The WebSocket terminal endpoint (`/terminals/{id}/ws`) can forward input to running agent terminals and rejects non-loopback connections. Do not expose the server to untrusted networks without adding authentication.
 
 **DNS rebinding protection** — the server validates HTTP `Host` headers and rejects requests where the host is not `localhost` or `127.0.0.1` with `400 Bad Request`. This guards against [DNS rebinding attacks](https://owasp.org/www-community/attacks/DNS_Rebinding).
 

@@ -4,7 +4,6 @@ import json
 import logging
 import re
 import shlex
-import subprocess
 import time
 from pathlib import Path
 from typing import Optional
@@ -108,7 +107,7 @@ class ClaudeCodeProvider(BaseProvider):
         if profile is not None and isinstance(native, str) and native:
             # Thin wrapper: CAO profile maps to a native Claude Code agent.
             # Let Claude Code handle all config (MCP servers, hooks, tools, model).
-            # CAO_TERMINAL_ID propagates via tmux pane env inheritance.
+            # CAO_TERMINAL_ID propagates via kitty window env inheritance.
             command_parts.extend(["--agent", native])
         elif self._agent_profile is not None and profile is None:
             # No CAO profile exists — pass agent name directly to Claude Code's
@@ -163,7 +162,7 @@ class ClaudeCodeProvider(BaseProvider):
         claude_cmd = shlex.join(command_parts)
 
         # When cao-server runs inside a Claude Code session, CLAUDE* env vars
-        # leak into spawned tmux panes (via the tmux server's global env).
+        # leak into spawned kitty windows (via the kitty process's global env).
         # Claude Code detects these and refuses to start ("nested session").
         # Unset all matching vars except CLAUDE_CODE_USE_*,
         # CLAUDE_CODE_SKIP_*_AUTH (needed for provider authentication:
@@ -231,13 +230,12 @@ class ClaudeCodeProvider(BaseProvider):
             #    Only act once — the text stays in the buffer after dismissal.
             if not bypass_accepted and re.search(BYPASS_PROMPT_PATTERN, clean_output):
                 logger.info("Bypass permissions prompt detected, auto-accepting")
-                target = f"{self.session_name}:{self.window_name}"
                 # Send raw Down arrow escape sequence (-l for literal) to move
                 # cursor to "Yes, I accept", then Enter to confirm.
-                # tmux send-keys "Down" doesn't work with Claude's Ink TUI.
-                subprocess.run(["tmux", "send-keys", "-t", target, "-l", "\x1b[B"], check=False)
+                # Named "Down" doesn't work with Claude's Ink TUI.
+                tmux_client.send_literal_keys(self.session_name, self.window_name, "\x1b[B")
                 time.sleep(0.5)
-                subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], check=False)
+                tmux_client.send_special_key(self.session_name, self.window_name, "Enter")
                 bypass_accepted = True
                 time.sleep(1.0)
                 continue  # Trust prompt may follow
@@ -245,11 +243,7 @@ class ClaudeCodeProvider(BaseProvider):
             # 2) Handle workspace trust prompt
             if re.search(TRUST_PROMPT_PATTERN, clean_output):
                 logger.info("Workspace trust prompt detected, auto-accepting")
-                session = tmux_client.server.sessions.get(session_name=self.session_name)
-                window = session.windows.get(window_name=self.window_name)
-                pane = window.active_pane
-                if pane:
-                    pane.send_keys("", enter=True)
+                tmux_client.send_special_key(self.session_name, self.window_name, "Enter")
                 return
 
             # 3) Claude Code fully started — no prompts needed
@@ -265,7 +259,7 @@ class ClaudeCodeProvider(BaseProvider):
 
     def initialize(self) -> bool:
         """Initialize Claude Code provider by starting claude command."""
-        # Wait for shell prompt to appear in the tmux window
+        # Wait for shell prompt to appear in the kitty window
         if not wait_for_shell(tmux_client, self.session_name, self.window_name, timeout=10.0):
             raise TimeoutError("Shell initialization timed out after 10 seconds")
 
@@ -327,11 +321,11 @@ class ClaudeCodeProvider(BaseProvider):
         Bug history:
         1. Stale-spinner bug (#104): Old spinner lines persist in the tmux
            scrollback after the agent returns to idle (Claude Code renders
-           inline, not alt-screen, inside a tmux pane). Position comparison
+           inline, not alt-screen, inside a kitty window). Position comparison
            of last spinner vs last idle prompt catches this.
 
         2. Mid-tool-execution race (this issue): The ❯ input prompt is ALWAYS
-           rendered at the bottom of the tmux pane (last position in the
+           rendered at the bottom of the kitty window (last position in the
            scrollback buffer). Position-based comparisons against ❯ are
            therefore unreliable — last_idle.start() is always greater than
            any other marker when anything has been typed/executed.

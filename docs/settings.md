@@ -100,9 +100,9 @@ defaults, so loopback access is preserved even when the env var is set:
 |---|---|---|
 | `CAO_ALLOWED_HOSTS` | `ALLOWED_HOSTS` (Host header allowlist used by `TrustedHostMiddleware`) | Fronting cao-server with a reverse proxy at a hostname other than `localhost` / `127.0.0.1`. |
 | `CAO_CORS_ORIGINS` | `CORS_ORIGINS` (browser origins permitted by CORS) | Serving the web UI from a non-default port, or from another origin (e.g. a custom dashboard). |
-| `CAO_WS_ALLOWED_CLIENTS` | `WS_ALLOWED_CLIENTS` (client IPs permitted to attach to the PTY WebSocket) | Running `cao-server` inside Docker where the host browser arrives via a bridge IP (e.g. `172.17.0.1`). |
+| `CAO_WS_ALLOWED_CLIENTS` | `WS_ALLOWED_CLIENTS` (client IPs permitted to connect to the terminal WebSocket) | Running `cao-server` inside Docker where the host browser arrives via a bridge IP (e.g. `172.17.0.1`). |
 
-Example — running `cao-server` in a container that accepts WebSocket attaches
+Example — running `cao-server` in a container that accepts WebSocket connections
 from the Docker bridge:
 
 ```bash
@@ -112,7 +112,7 @@ CAO_WS_ALLOWED_CLIENTS=172.17.0.1 \
   uv tool run cao-server --host 0.0.0.0
 ```
 
-> **Security note:** the WebSocket PTY endpoint is unauthenticated. Only add
-> client IPs you actually trust to `CAO_WS_ALLOWED_CLIENTS` — anyone who can
-> reach the listener at one of those IPs gets full PTY access to running
-> agent terminals.
+> **Security note:** the WebSocket terminal endpoint is unauthenticated. Only add
+> client IPs actually trusted to `CAO_WS_ALLOWED_CLIENTS` — anyone who can
+> reach the listener at one of those IPs can forward input to running agent
+> terminals.

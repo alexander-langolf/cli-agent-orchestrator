@@ -2,10 +2,10 @@
 
 Tests the full skill pipeline — validates that:
 1. The skill catalog text is injected into the provider CLI command
-   (verified by inspecting the tmux scrollback, not LLM output)
+   (verified by inspecting terminal scrollback, not LLM output)
 2. The load_skill MCP tool / API endpoint returns installed skill content
 
-Requires: running CAO server, authenticated CLI tools, tmux, seeded skills.
+Requires: running CAO server, authenticated CLI tools, kitty, seeded skills.
 
 Run:
     uv run pytest -m e2e test/e2e/test_skills.py -v
@@ -13,7 +13,6 @@ Run:
     uv run pytest -m e2e test/e2e/test_skills.py -v -k ClaudeCode
 """
 
-import subprocess
 import time
 import uuid
 from test.e2e.conftest import (
@@ -25,6 +24,7 @@ from test.e2e.conftest import (
 import pytest
 import requests
 
+from cli_agent_orchestrator.clients.tmux import tmux_client
 from cli_agent_orchestrator.cli.commands.init import seed_default_skills
 from cli_agent_orchestrator.constants import API_BASE_URL, GEMINI_WORKSPACES_DIR
 
@@ -36,21 +36,17 @@ def ensure_skills_seeded():
 
 
 def _capture_full_scrollback(session_name: str, window_name: str) -> str:
-    """Capture the full tmux scrollback buffer for a pane.
+    """Capture the full terminal scrollback buffer for a window.
 
-    Uses ``tmux capture-pane -p -S -`` to capture from the very start of
-    the scrollback buffer, not just the last N lines. This ensures the
-    initial CLI command (which contains the injected skill catalog) is
-    included even if the agent's output has pushed it far up.
+    This ensures the initial CLI command (which contains the injected skill
+    catalog) is included even if the agent's output has pushed it far up.
     """
-    target = f"{session_name}:{window_name}"
-    result = subprocess.run(
-        ["tmux", "capture-pane", "-p", "-S", "-", "-t", target],
-        capture_output=True,
-        text=True,
-        timeout=10,
+    return tmux_client.get_history(
+        session_name,
+        window_name,
+        strip_escapes=True,
+        full_history=True,
     )
-    return result.stdout
 
 
 def _run_skill_injection_test(provider: str, agent_profile: str):
@@ -60,7 +56,7 @@ def _run_skill_injection_test(provider: str, agent_profile: str):
     skill catalog text reached the provider.
 
     For most providers the catalog is embedded in the CLI command string
-    sent via tmux send-keys and is therefore visible in tmux scrollback.
+    sent through the terminal client and is therefore visible in scrollback.
     Gemini CLI is an exception: its system prompt is written to
     ``GEMINI.md`` in the working directory because passing the catalog via
     ``-i`` causes Gemini to treat it as a task to execute. For Gemini we
@@ -104,14 +100,13 @@ def _run_skill_injection_test(provider: str, agent_profile: str):
             payload = _read_gemini_md(terminal_id)
             source = "GEMINI.md"
         else:
-            # Capture the full tmux scrollback (capture-pane -S - reads from the
-            # very start of the buffer so the initial CLI command with the
-            # injected catalog is included).
+            # Capture the full scrollback so the initial CLI command with the
+            # injected catalog is included.
             resp = requests.get(f"{API_BASE_URL}/terminals/{terminal_id}")
             assert resp.status_code == 200
             window_name = resp.json()["name"]
             payload = _capture_full_scrollback(actual_session, window_name)
-            source = "tmux scrollback"
+            source = "terminal scrollback"
 
         assert len(payload.strip()) > 0, f"{source} should not be empty"
 
@@ -162,7 +157,7 @@ class TestCodexSkills:
 
 # NOTE: Claude Code is excluded from injection tests because its full-screen
 # TUI clears the visible screen on startup, wiping the tail of the long
-# command (where the skill catalog lives) from the tmux scrollback. Skill
+# command (where the skill catalog lives) from the terminal scrollback. Skill
 # injection for Claude Code is covered by unit tests (_apply_skill_prompt,
 # skill_prompt kwarg passing) and validated indirectly via the Codex test
 # which exercises the same global-catalog service-layer code path.

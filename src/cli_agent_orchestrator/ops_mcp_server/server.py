@@ -374,7 +374,7 @@ async def shutdown_session(
 ) -> JsonDict:
     """Cleanly shut down a CAO session.
 
-    Exits all providers, kills the tmux session, and removes database records.
+    Exits all providers, kills the kitty session, and removes database records.
 
     Args:
         session_name: CAO session name to shut down

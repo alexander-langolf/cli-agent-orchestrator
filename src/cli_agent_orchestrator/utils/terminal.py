@@ -13,24 +13,24 @@ from cli_agent_orchestrator.constants import API_BASE_URL, SESSION_PREFIX
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 
 if TYPE_CHECKING:
-    from cli_agent_orchestrator.clients.zellij import ZellijClient
+    from cli_agent_orchestrator.clients.tmux import KittyClient
     from cli_agent_orchestrator.providers.base import BaseProvider
 
 logger = logging.getLogger(__name__)
 
-# Allowlist for tmux session/window names. tmux uses ':' and '.' as target
-# delimiters and treats leading '-' as an option, so we constrain names to
-# safe characters only. The 64-char cap matches typical tmux name lengths.
+# Allowlist for kitty session/window names. Kitty remote-control match
+# expressions use punctuation as syntax, so we constrain names to safe
+# characters only and keep a compact 64-character cap.
 _VALID_TMUX_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_\-]{0,63}$")
 
 
 def validate_tmux_name(name: str, kind: str = "name") -> str:
-    """Validate a tmux session or window name against an allowlist.
+    """Validate a kitty session or window name against an allowlist.
 
-    Rejects names containing tmux target delimiters (':', '.'), shell
-    metacharacters, leading dashes (parsed as flags), or any character
-    outside ``[A-Za-z0-9_-]``. The first character must be alphanumeric
-    or underscore.
+    Rejects names containing kitty match-expression punctuation, shell
+    metacharacters, leading dashes, or any character outside
+    ``[A-Za-z0-9_-]``. The first character must be alphanumeric or
+    underscore.
 
     Args:
         name: Candidate session or window name.
@@ -70,7 +70,7 @@ def generate_window_name(agent_profile: str) -> str:
 
 
 def wait_for_shell(
-    zellij_client: "ZellijClient",
+    tmux_client: "KittyClient",
     session_name: str,
     window_name: str,
     timeout: float = 10.0,
@@ -82,7 +82,7 @@ def wait_for_shell(
     previous_output = None
 
     while time.time() - start_time < timeout:
-        output = zellij_client.get_history(session_name, window_name)
+        output = tmux_client.get_history(session_name, window_name)
 
         if output and output.strip() and previous_output is not None and output == previous_output:
             logger.info(f"Shell ready")

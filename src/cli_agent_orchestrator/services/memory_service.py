@@ -1502,7 +1502,7 @@ class MemoryService:
                     "cwd": None,
                 }
 
-            # Resolve cwd via tmux pane lookup. Lazy-import to avoid
+            # Resolve cwd via kitty window lookup. Lazy-import to avoid
             # importing terminal_service at module load (circular import).
             try:
                 from cli_agent_orchestrator.services.terminal_service import (

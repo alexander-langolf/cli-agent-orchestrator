@@ -16,91 +16,22 @@ echo "Installing CLI Agent Orchestrator (version: ${VERSION})..."
 # Install system dependencies with distro-aware package manager detection.
 if command -v apt-get &>/dev/null; then
     apt-get update -y \
-        && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tmux git curl \
+        && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates git curl kitty \
         && rm -rf /var/lib/apt/lists/*
 elif command -v apk &>/dev/null; then
-    apk add --no-cache tmux git curl
+    apk add --no-cache ca-certificates git curl kitty
 else
     echo "ERROR: Unsupported base image. Expected apt-get or apk to install dependencies." >&2
     exit 1
 fi
 
-read_tmux_version() {
-    TMUX_VERSION="$(tmux -V | awk '{print $2}')"
-    TMUX_MAJOR="$(printf '%s' "$TMUX_VERSION" | awk -F. '{print $1}')"
-    TMUX_MINOR_RAW="$(printf '%s' "$TMUX_VERSION" | awk -F. '{print $2}')"
-    TMUX_MINOR="${TMUX_MINOR_RAW%%[^0-9]*}"
-}
-
-tmux_version_ok() {
-    read_tmux_version
-    if [[ -z "$TMUX_MAJOR" || ! "$TMUX_MAJOR" =~ ^[0-9]+$ || -z "$TMUX_MINOR" || ! "$TMUX_MINOR" =~ ^[0-9]+$ ]]; then
-        return 1
-    fi
-    (( TMUX_MAJOR > 3 || (TMUX_MAJOR == 3 && TMUX_MINOR >= 3) ))
-}
-
-install_tmux_build_deps() {
-    if command -v apt-get &>/dev/null; then
-        apt-get update -y \
-            && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-                libevent-dev libncurses-dev build-essential autoconf automake pkg-config bison \
-            && rm -rf /var/lib/apt/lists/*
-    elif command -v apk &>/dev/null; then
-        apk add --no-cache libevent-dev ncurses-dev build-base autoconf automake pkgconf bison
-    else
-        echo "ERROR: Unsupported base image for tmux source install." >&2
-        return 1
-    fi
-}
-
-install_tmux_from_source() {
-    local tmp_dir
-    local tmux_ref="${TMUX_SOURCE_REF:-3.4}"
-    tmp_dir="$(mktemp -d)"
-    echo "Building tmux ${tmux_ref} from source in $tmp_dir..."
-    if ! git clone --depth 1 --branch "$tmux_ref" https://github.com/tmux/tmux.git "$tmp_dir/tmux"; then
-        rm -rf "$tmp_dir"
-        echo "ERROR: Failed to clone tmux source repository at ref ${tmux_ref}." >&2
-        return 1
-    fi
-    if ! (cd "$tmp_dir/tmux" && sh autogen.sh && ./configure && make && make install); then
-        rm -rf "$tmp_dir"
-        echo "ERROR: tmux source build failed." >&2
-        return 1
-    fi
-    rm -rf "$tmp_dir"
-}
-
-ensure_tmux_at_least_33() {
-    if tmux_version_ok; then
+ensure_kitty() {
+    if command -v kitty &>/dev/null && command -v kitten &>/dev/null; then
+        echo "kitty already installed: $(kitty --version)"
         return 0
     fi
 
-    echo "tmux >= 3.3 is required; attempting package-manager upgrade..."
-    if command -v apt-get &>/dev/null; then
-        apt-get update -y \
-            && DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y tmux \
-            && rm -rf /var/lib/apt/lists/* || true
-    elif command -v apk &>/dev/null; then
-        apk upgrade tmux || true
-    fi
-
-    if tmux_version_ok; then
-        echo "tmux upgraded via package manager: $(tmux -V)"
-        return 0
-    fi
-
-    echo "Package-manager tmux is still too old; falling back to source install (see tmux-install.sh)..."
-    install_tmux_build_deps || return 1
-    install_tmux_from_source || return 1
-
-    if tmux_version_ok; then
-        echo "tmux installed from source: $(tmux -V)"
-        return 0
-    fi
-
-    echo "ERROR: tmux >= 3.3 is required, but found $(tmux -V 2>/dev/null || echo 'none')." >&2
+    echo "ERROR: kitty and kitten are required, but one or both were not found on PATH." >&2
     return 1
 }
 
@@ -130,8 +61,8 @@ else
     fi
 fi
 
-ensure_tmux_at_least_33 || {
-    echo "ERROR: Could not install tmux >= 3.3 (see repo/tmux-install.sh for manual setup)." >&2
+ensure_kitty || {
+    echo "ERROR: Could not install kitty." >&2
     exit 1
 }
 

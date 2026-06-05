@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from cli_agent_orchestrator.clients.zellij import zellij_client
+from cli_agent_orchestrator.clients.tmux import tmux_client
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import BaseProvider
 from cli_agent_orchestrator.utils.terminal import wait_for_shell
@@ -79,7 +79,7 @@ class CopilotCliProvider(BaseProvider):
 
     def _history(self, tail_lines: Optional[int] = None) -> str:
         try:
-            raw = zellij_client.get_history(
+            raw = tmux_client.get_history(
                 self.session_name, self.window_name, tail_lines=tail_lines
             )
         except (
@@ -142,11 +142,11 @@ class CopilotCliProvider(BaseProvider):
 
         command_parts.extend(["--config-dir", str(config_dir)])
         try:
-            pane_working_dir = zellij_client.get_pane_working_directory(
+            pane_working_dir = tmux_client.get_pane_working_directory(
                 self.session_name,
                 self.window_name,
             )
-        except (OSError, RuntimeError, ValueError):
+        except (LibKittyException, OSError, RuntimeError, ValueError):
             pane_working_dir = None
 
         if not isinstance(pane_working_dir, str) or not pane_working_dir.strip():
@@ -195,10 +195,10 @@ class CopilotCliProvider(BaseProvider):
         return json.dumps({"mcpServers": merged_servers}, ensure_ascii=False)
 
     def _send_enter(self) -> None:
-        zellij_client.send_special_key(self.session_name, self.window_name, "Enter")
+        tmux_client.send_special_key(self.session_name, self.window_name, "Enter")
 
     def _send_key(self, key: str) -> None:
-        zellij_client.send_special_key(self.session_name, self.window_name, key)
+        tmux_client.send_special_key(self.session_name, self.window_name, key)
 
     def _accept_trust_prompts(self, timeout: float = 30.0) -> None:
         start = time.time()
@@ -263,7 +263,7 @@ class CopilotCliProvider(BaseProvider):
     def initialize(self) -> bool:
         try:
             shell_ready = wait_for_shell(
-                zellij_client, self.session_name, self.window_name, timeout=30.0
+                tmux_client, self.session_name, self.window_name, timeout=30.0
             )
         except Exception as exc:
             logger.warning(
@@ -277,7 +277,7 @@ class CopilotCliProvider(BaseProvider):
         if not shell_ready:
             raise TimeoutError("Shell initialization timed out after 30 seconds")
 
-        zellij_client.send_keys(self.session_name, self.window_name, self._command())
+        tmux_client.send_keys(self.session_name, self.window_name, self._command())
 
         deadline = time.time() + 60.0
         self._accept_trust_prompts(timeout=10.0)

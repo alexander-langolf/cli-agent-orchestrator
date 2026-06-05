@@ -52,7 +52,7 @@ def restore(terminal_id: str):
 
     # Create a plain window (no agent) in the existing session
     # Pass the scrollback file as the initial command: cat prints it as output,
-    # then exec replaces cat with the user's login shell (tmux-resurrect pattern).
+    # then exec replaces cat with the user's login shell (resurrect pattern).
     window_name = f"restored-{original_window}"
     login_shell = os.environ.get("SHELL", "bash")
 

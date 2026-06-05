@@ -18,10 +18,11 @@ class TerminalStatus(str, Enum):
     COMPLETED = "completed"
     WAITING_USER_ANSWER = "waiting_user_answer"
     ERROR = "error"
+    INTERRUPTED = "interrupted"
 
 
 class Terminal(BaseModel):
-    """Terminal model - represents a Zellij tab."""
+    """Terminal model - represents a kitty window."""
 
     model_config = ConfigDict(use_enum_values=True)
 

@@ -4,7 +4,7 @@ This module defines all configuration constants used throughout the CAO applicat
 including directory paths, server settings, and provider configurations.
 
 The CAO application orchestrates multiple CLI-based AI agents (Kiro CLI, Claude Code,
-Codex, Kimi CLI, Q CLI) through Zellij sessions, providing a unified interface
+Codex, Kimi CLI, Q CLI) through kitty sessions, providing a unified interface
 for agent management.
 """
 
@@ -16,7 +16,7 @@ from cli_agent_orchestrator.models.provider import ProviderType
 # =============================================================================
 # Session Configuration
 # =============================================================================
-# All CAO-managed Zellij sessions are prefixed to distinguish them from user sessions
+# All CAO-managed kitty sessions are prefixed to distinguish them from user sessions
 SESSION_PREFIX = "cao-"
 
 # =============================================================================
@@ -30,11 +30,11 @@ PROVIDERS = [p.value for p in ProviderType]
 DEFAULT_PROVIDER = ProviderType.KIRO_CLI.value
 
 # =============================================================================
-# Terminal Runtime Configuration
+# Kitty Configuration
 # =============================================================================
 # Maximum lines of terminal history to capture when analyzing output
 # Higher values provide more context but increase memory usage
-TERMINAL_HISTORY_LINES = 200
+TMUX_HISTORY_LINES = 200
 
 # =============================================================================
 # Application Directory Structure
@@ -50,7 +50,7 @@ DB_DIR = CAO_HOME_DIR / "db"
 
 # Log file directory structure
 LOG_DIR = CAO_HOME_DIR / "logs"
-TERMINAL_LOG_DIR = LOG_DIR / "terminal"  # Per-terminal log files for Zellij subscribe output
+TERMINAL_LOG_DIR = LOG_DIR / "terminal"  # Per-terminal log files
 TERMINAL_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # =============================================================================
@@ -59,6 +59,11 @@ TERMINAL_LOG_DIR.mkdir(parents=True, exist_ok=True)
 # Polling interval for detecting log file changes (seconds)
 # Lower values = faster response, higher CPU usage
 INBOX_POLLING_INTERVAL = 5
+
+# Polling interval for detecting unexpectedly closed agent windows.
+TERMINAL_INTERRUPT_MONITOR_INTERVAL = float(
+    os.environ.get("CAO_TERMINAL_INTERRUPT_MONITOR_INTERVAL", "2")
+)
 
 # Eager inbox delivery: when enabled, deliver queued messages to terminals in
 # PROCESSING or WAITING_USER_ANSWER state for providers that declare
@@ -195,9 +200,9 @@ ALLOWED_HOSTS = [
     "127.0.0.1",
 ] + _split_env_list("CAO_ALLOWED_HOSTS")
 
-# Allowed client IPs/hostnames for the WebSocket PTY attach endpoint.
-# Defaults: loopback-only. The WebSocket endpoint provides unauthenticated PTY
-# access, so this list is deliberately tight.
+# Allowed client IPs/hostnames for the WebSocket terminal endpoint.
+# Defaults: loopback-only. The WebSocket endpoint forwards input to running
+# agent terminals without authentication, so this list is deliberately tight.
 # Operators running cao-server inside a container (e.g. Docker, where the host
 # browser connects via a bridge IP like 172.17.0.1) can extend the list with
 # ``CAO_WS_ALLOWED_CLIENTS`` (comma-separated). See issue #149.

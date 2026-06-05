@@ -9,6 +9,7 @@ from cli_agent_orchestrator.plugins import (
     PostKillSessionEvent,
     PostKillTerminalEvent,
     PostSendMessageEvent,
+    PostTerminalInterruptedEvent,
     __all__,
     hook,
 )
@@ -24,6 +25,9 @@ from cli_agent_orchestrator.plugins.events import (
 from cli_agent_orchestrator.plugins.events import PostKillSessionEvent as BasePostKillSessionEvent
 from cli_agent_orchestrator.plugins.events import PostKillTerminalEvent as BasePostKillTerminalEvent
 from cli_agent_orchestrator.plugins.events import PostSendMessageEvent as BasePostSendMessageEvent
+from cli_agent_orchestrator.plugins.events import (
+    PostTerminalInterruptedEvent as BasePostTerminalInterruptedEvent,
+)
 from cli_agent_orchestrator.plugins.registry import PluginRegistry as BasePluginRegistry
 
 
@@ -41,6 +45,7 @@ class TestPluginPackageAPI:
         assert PostKillSessionEvent is BasePostKillSessionEvent
         assert PostCreateTerminalEvent is BasePostCreateTerminalEvent
         assert PostKillTerminalEvent is BasePostKillTerminalEvent
+        assert PostTerminalInterruptedEvent is BasePostTerminalInterruptedEvent
         assert PluginRegistry is BasePluginRegistry
 
     def test___all___contains_exactly_the_phase_two_public_api(self) -> None:
@@ -55,5 +60,6 @@ class TestPluginPackageAPI:
             "PostKillSessionEvent",
             "PostCreateTerminalEvent",
             "PostKillTerminalEvent",
+            "PostTerminalInterruptedEvent",
             "PluginRegistry",
         ]

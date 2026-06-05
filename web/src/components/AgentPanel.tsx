@@ -68,7 +68,7 @@ export function AgentPanel() {
       await api.deleteTerminal(id)
       if (liveTerminal?.id === id) setLiveTerminal(null)
       if (activeSession) await selectSession(activeSession)
-      showSnackbar({ type: 'success', message: `Terminal ${id} closed — Zellij tab killed` })
+      showSnackbar({ type: 'success', message: `Terminal ${id} closed — tmux window killed` })
     } catch {
       showSnackbar({ type: 'error', message: `Failed to close terminal ${id}` })
     }
@@ -466,12 +466,12 @@ export function AgentPanel() {
       <ConfirmModal
         open={!!pendingClose}
         title="Close Terminal"
-        message="This will kill the Zellij tab and terminate the agent process. This action cannot be undone."
+        message="This will kill the tmux window and terminate the agent process. This action cannot be undone."
         details={pendingClose ? [
           { label: 'Terminal ID', value: pendingClose.id },
           { label: 'Provider', value: pendingClose.provider },
           { label: 'Profile', value: pendingClose.agent_profile || 'none' },
-          { label: 'Session', value: pendingClose.session_name },
+          { label: 'Session', value: pendingClose.tmux_session },
         ] : []}
         confirmLabel="Close Terminal"
         variant="danger"
@@ -489,7 +489,7 @@ export function AgentPanel() {
           { label: 'Terminal ID', value: pendingExit.id },
           { label: 'Provider', value: pendingExit.provider },
           { label: 'Profile', value: pendingExit.agent_profile || 'none' },
-          { label: 'Session', value: pendingExit.session_name },
+          { label: 'Session', value: pendingExit.tmux_session },
         ] : []}
         confirmLabel="Send Exit"
         variant="warning"
@@ -508,7 +508,7 @@ export function AgentPanel() {
               <div>
                 <h3 className="text-base font-semibold text-gray-200">Spawn Agent</h3>
                 <p className="text-xs text-gray-500 mt-1">
-                  Launch a new AI agent in its own isolated Zellij session.
+                  Launch a new AI agent in its own isolated tmux session.
                 </p>
               </div>
               <button

@@ -83,10 +83,10 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras --dev
 
-      - name: Install tmux
+      - name: Install kitty
         run: |
           sudo apt-get update
-          sudo apt-get install -y tmux
+          sudo apt-get install -y kitty
 
       # Note: Q CLI installation and authentication steps would go here
       # These are commented out as they require AWS credentials and Q CLI setup

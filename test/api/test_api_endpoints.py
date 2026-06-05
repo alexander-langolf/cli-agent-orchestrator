@@ -327,13 +327,13 @@ class TestCreateSession:
         "bad_name",
         # NB: '-leading' is not in this set — terminal_service prepends the
         # SESSION_PREFIX 'cao-' so the effective name becomes 'cao--leading',
-        # which is a valid tmux target (no leading dash). The boundary check
+        # which is a valid kitty target name (no leading dash). The boundary check
         # validates the prefixed value, so leading-dash inputs are accepted
         # here but rejected on path-param routes that have no prefixing.
         ["evil:name", "evil.name", "with space", "../escape", "name;rm"],
     )
     def test_create_session_rejects_unsafe_name(self, client, bad_name):
-        """POST /sessions rejects session names that could break tmux target parsing."""
+        """POST /sessions rejects session names that could break kitty target matching."""
         with patch("cli_agent_orchestrator.api.main.session_service") as mock_svc:
             response = client.post(
                 "/sessions",
@@ -634,8 +634,8 @@ class TestListTerminalsInSession:
     def test_list_terminals_success(self, client):
         """GET /sessions/{name}/terminals returns terminal list."""
         mock_terminals = [
-            {"id": "abcd1234", "session_name": "s1", "provider": "kiro_cli"},
-            {"id": "abcd5678", "session_name": "s1", "provider": "claude_code"},
+            {"id": "abcd1234", "tmux_session": "s1", "provider": "kiro_cli"},
+            {"id": "abcd5678", "tmux_session": "s1", "provider": "claude_code"},
         ]
         with patch(
             "cli_agent_orchestrator.clients.database.list_terminals_by_session",

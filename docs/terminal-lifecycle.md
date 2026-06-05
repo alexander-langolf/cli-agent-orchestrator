@@ -2,7 +2,7 @@
 
 ## Overview
 
-Each terminal created by CAO (via `assign` or `handoff`) occupies a tmux window
+Each terminal created by CAO (via `assign` or `handoff`) occupies a kitty window
 and a database record. In long-running sessions, terminals accumulate and can
 exhaust system resources. CAO provides automatic and manual cleanup paths.
 

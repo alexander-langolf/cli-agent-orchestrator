@@ -743,7 +743,7 @@ def delete_terminal(
     """Delete a terminal that is no longer needed, freeing system resources.
 
     Use this to clean up terminals created via assign once you have received
-    their results or no longer need them. This kills the tmux window and
+    their results or no longer need them. This kills the kitty window and
     removes the terminal record.
 
     Handoff terminals are automatically cleaned up on success — you only need

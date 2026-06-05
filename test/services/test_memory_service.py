@@ -995,7 +995,7 @@ class TestTerminalContextResolution:
 
         monkeypatch.setattr(db_mod, "SessionLocal", lambda: _FakeSession())
 
-        # Stub get_working_directory so we don't need a real tmux pane.
+        # Stub get_working_directory so we don't need a real kitty window.
         from cli_agent_orchestrator.services import terminal_service as ts_mod
 
         monkeypatch.setattr(

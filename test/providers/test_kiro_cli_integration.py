@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from cli_agent_orchestrator.clients.zellij import zellij_client
+from cli_agent_orchestrator.clients.tmux import tmux_client
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.kiro_cli import KiroCliProvider
 from cli_agent_orchestrator.utils.terminal import wait_for_shell
@@ -73,15 +73,15 @@ def test_session_name():
 def cleanup_session(test_session_name):
     yield
     try:
-        zellij_client.kill_session(test_session_name)
+        tmux_client.kill_session(test_session_name)
     except Exception:
         pass
 
 
 @pytest.fixture
 def provider(ensure_test_agent, test_session_name, cleanup_session):
-    """Create Zellij session and provider, ready for use."""
-    zellij_client.create_session(test_session_name, WINDOW_NAME, TERMINAL_ID)
+    """Create kitty session and provider, ready for use."""
+    tmux_client.create_session(test_session_name, WINDOW_NAME, TERMINAL_ID)
     return KiroCliProvider(TERMINAL_ID, test_session_name, WINDOW_NAME, ensure_test_agent)
 
 
@@ -111,7 +111,7 @@ def pytest_runtest_makereport(item, call):
 
 @pytest.fixture(autouse=True)
 def watch_session(test_session_name, provider):
-    """Open Terminal.app attached to test Zellij session. Opt-in: CAO_TEST_WATCH=1"""
+    """Open Terminal.app attached to test kitty session. Opt-in: CAO_TEST_WATCH=1"""
     if not WATCH_MODE:
         yield
         return
@@ -119,7 +119,11 @@ def watch_session(test_session_name, provider):
         [
             "osascript",
             "-e",
-            f'tell application "Terminal" to do script "zellij attach {test_session_name}"',
+            (
+                'tell application "Terminal" to do script '
+                f'"kitten @ --to unix:~/.aws/cli-agent-orchestrator/kitty/{test_session_name}.sock '
+                f'focus-window --match env:CAO_SESSION_NAME={test_session_name}"'
+            ),
         ],
     )
     time.sleep(1)
@@ -135,7 +139,7 @@ PERM_RE = re.compile(r"Allow this action\?.*?\[.*?y.*?/.*?n.*?/.*?t.*?\]:", re.D
 
 def _clean(session):
     """Get terminal output with ANSI codes stripped."""
-    raw = zellij_client.get_history(session, WINDOW_NAME)
+    raw = tmux_client.get_history(session, WINDOW_NAME)
     return ANSI_RE.sub("", raw)
 
 
@@ -161,7 +165,7 @@ def _wait_for_status(provider, target, timeout=30):
 
 
 def _send(session, text):
-    zellij_client.send_keys(session, WINDOW_NAME, text)
+    tmux_client.send_keys(session, WINDOW_NAME, text)
 
 
 def _log(tag, msg):
@@ -244,7 +248,7 @@ class TestKiroCliPermissionPromptIntegration:
 
         Note: send_keys includes Enter, so this submits the text rather than
         typing without pressing Enter (P8 partial typing case would need
-        Zellij send-keys without Enter, which the API doesn't support yet).
+        tmux send-keys without Enter, which the API doesn't support yet).
         """
         _log("P3", "Initializing...")
         provider.initialize()

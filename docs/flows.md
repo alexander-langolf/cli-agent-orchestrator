@@ -28,8 +28,9 @@ cao flow list
 cao flow run morning-trivia
 
 # 5. View flow execution (after it runs)
-tmux list-sessions
-tmux attach -t <session-name>
+ls ~/.aws/cli-agent-orchestrator/kitty/*.sock
+kitten @ --to unix:~/.aws/cli-agent-orchestrator/kitty/<session-name>.sock \
+  focus-window --match env:CAO_SESSION_NAME=<session-name>
 
 # 6. Cleanup session when done
 cao shutdown --session <session-name>

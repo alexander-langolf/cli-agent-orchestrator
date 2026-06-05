@@ -7,7 +7,7 @@ import time
 import click
 import requests
 
-from cli_agent_orchestrator.clients.zellij import zellij_client
+from cli_agent_orchestrator.clients.tmux import tmux_client
 from cli_agent_orchestrator.constants import (
     API_BASE_URL,
     DEFAULT_PROVIDER,
@@ -31,7 +31,7 @@ PROVIDERS_REQUIRING_WORKSPACE_ACCESS = {
 }
 
 # Validation constraints for ``--env`` forwarded vars (mirrored server-side
-# in ``TmuxClient._merge_extra_env``). See issue #248.
+# in ``KittyClient._merge_extra_env``). See issue #248.
 _FORWARDED_ENV_BLOCKED_PREFIXES = ("CLAUDE", "CODEX_", "__MISE_")
 _FORWARDED_ENV_PREFIX_ALLOWLIST = frozenset(
     {
@@ -49,7 +49,7 @@ _FORWARDED_ENV_MAX_VALUE_BYTES = 2048
 def _parse_env_pairs(pairs):
     """Parse repeated ``KEY=VALUE`` entries into a dict, validating each.
 
-    Mirrors the constraints applied to inherited env in TmuxClient so a
+    Mirrors the constraints applied to inherited env in KittyClient so a
     forwarded var that would be silently dropped server-side is rejected at
     the CLI boundary with a clear error message instead.
     """
@@ -79,7 +79,7 @@ def _parse_env_pairs(pairs):
         if len(value.encode("utf-8")) >= _FORWARDED_ENV_MAX_VALUE_BYTES:
             raise click.ClickException(
                 f"--env value for {key!r} exceeds {_FORWARDED_ENV_MAX_VALUE_BYTES} bytes "
-                "(tmux argv limit, PR #246)"
+                "(terminal launcher argv limit, PR #246)"
             )
         result[key] = value
     return result
@@ -294,10 +294,12 @@ def launch(
         click.echo(f"Session created: {terminal['session_name']}")
         click.echo(f"Terminal created: {terminal['name']}")
 
-        # Attach to Zellij session unless headless. Wait for the provider to
-        # finish initializing first so attach-time terminal changes do not race
-        # with the TUI's input handler wiring. The wait is advisory: if it
-        # times out we still attach so the user can inspect the session.
+        # Focus the kitty session unless headless. Wait for the provider to
+        # finish initializing first - otherwise early focus races with the
+        # TUI's input handler wiring, can resize the pty mid-init, and the TUI
+        # silently drops keystrokes. See issue #220. The wait is advisory:
+        # if it times out we still focus so the user can inspect the
+        # half-initialized session.
         if not headless:
             ready = wait_until_terminal_status(
                 terminal["id"],
@@ -312,10 +314,7 @@ def launch(
                         fg="yellow",
                     )
                 )
-            subprocess.run(
-                ["zellij", "attach", terminal["session_name"]],
-                env=zellij_client._build_env(),
-            )
+            subprocess.run(tmux_client.attach_session_command(terminal["session_name"]))
         elif message:
             ready = wait_until_terminal_status(
                 terminal["id"],

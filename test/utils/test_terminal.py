@@ -67,7 +67,7 @@ class TestGenerateFunctions:
             generate_window_name("../escape")
 
 
-class TestValidateTmuxName:
+class TestValidateKittyName:
     """Tests for the tmux name allowlist validator."""
 
     @pytest.mark.parametrize(
@@ -130,19 +130,19 @@ class TestWaitForShell:
 
     def test_wait_for_shell_success(self):
         """Test successful shell wait."""
-        mock_Zellij = MagicMock()
+        mock_tmux = MagicMock()
         # Return same output twice to indicate shell is ready
-        mock_Zellij.get_history.side_effect = ["prompt $", "prompt $"]
+        mock_tmux.get_history.side_effect = ["prompt $", "prompt $"]
 
         result = wait_for_shell(
-            mock_Zellij, "test-session", "window-0", timeout=2.0, polling_interval=0.1
+            mock_tmux, "test-session", "window-0", timeout=2.0, polling_interval=0.1
         )
 
         assert result is True
 
     def test_wait_for_shell_timeout(self):
         """Test shell wait timeout."""
-        mock_Zellij = MagicMock()
+        mock_tmux = MagicMock()
         # Return different outputs each time
         call_count = [0]
 
@@ -150,21 +150,21 @@ class TestWaitForShell:
             call_count[0] += 1
             return f"output {call_count[0]}"
 
-        mock_Zellij.get_history.side_effect = get_history_side_effect
+        mock_tmux.get_history.side_effect = get_history_side_effect
 
         result = wait_for_shell(
-            mock_Zellij, "test-session", "window-0", timeout=0.5, polling_interval=0.1
+            mock_tmux, "test-session", "window-0", timeout=0.5, polling_interval=0.1
         )
 
         assert result is False
 
     def test_wait_for_shell_empty_output(self):
         """Test shell wait with empty output."""
-        mock_Zellij = MagicMock()
-        mock_Zellij.get_history.return_value = ""
+        mock_tmux = MagicMock()
+        mock_tmux.get_history.return_value = ""
 
         result = wait_for_shell(
-            mock_Zellij, "test-session", "window-0", timeout=0.5, polling_interval=0.1
+            mock_tmux, "test-session", "window-0", timeout=0.5, polling_interval=0.1
         )
 
         assert result is False

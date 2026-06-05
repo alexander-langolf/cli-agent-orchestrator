@@ -27,7 +27,7 @@ Provider coverage:
 Requires:
 - Running CAO server
 - Authenticated CLI tools (claude, kiro-cli, gemini, kimi)
-- Zellij
+- kitty
 - Agent profiles installed: code_supervisor, developer
 
 Run:

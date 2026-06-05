@@ -20,8 +20,8 @@ def info():
         # Display database path
         click.echo(f"Database path: {DATABASE_FILE}")
 
-        # Zellij exposes the active session name to panes.
-        session_name = os.environ.get("ZELLIJ_SESSION_NAME")
+        # Kitty session windows receive this marker when CAO creates them.
+        session_name = os.environ.get("CAO_SESSION_NAME")
 
         if session_name and session_name.startswith(SESSION_PREFIX):
             try:

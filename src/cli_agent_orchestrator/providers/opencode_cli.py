@@ -22,7 +22,7 @@ import re
 import shlex
 from typing import Optional
 
-from cli_agent_orchestrator.clients.zellij import zellij_client
+from cli_agent_orchestrator.clients.tmux import tmux_client
 from cli_agent_orchestrator.constants import OPENCODE_CONFIG_DIR, OPENCODE_CONFIG_FILE
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import BaseProvider
@@ -62,13 +62,13 @@ TOOL_CALL_IN_FLIGHT_PATTERN = r"^\s+[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+\S+"
 class OpenCodeCliProvider(BaseProvider):
     """Provider for OpenCode CLI integration.
 
-    Manages the lifecycle of an OpenCode TUI session inside a Zellij tab:
+    Manages the lifecycle of an OpenCode TUI session inside a kitty window:
     initialization, status detection, response extraction, and cleanup.
 
     Attributes:
         terminal_id: Unique identifier for this terminal instance
-        session_name: Name of the Zellij session containing this terminal
-        window_name: Name of the Zellij tab for this terminal
+        session_name: Name of the kitty session containing this terminal
+        window_name: Name of the kitty window for this terminal
         _agent_profile: Name of the installed OpenCode agent to launch
         _model: Optional model override (e.g. ``anthropic/claude-sonnet-4-6``)
     """
@@ -86,8 +86,8 @@ class OpenCodeCliProvider(BaseProvider):
 
         Args:
             terminal_id: Unique identifier for this terminal
-            session_name: Name of the Zellij session
-            window_name: Name of the Zellij tab
+            session_name: Name of the kitty session
+            window_name: Name of the kitty window
             agent_profile: Name of the installed OpenCode agent (e.g. ``"developer"``)
             allowed_tools: Optional CAO tool list (informational; enforcement is via frontmatter)
             model: Optional model override passed via ``--model`` at launch
@@ -108,14 +108,17 @@ class OpenCodeCliProvider(BaseProvider):
 
         Consumed by ``terminal_service.get_output`` via a ``getattr`` capability
         check: providers that define this attribute opt in to a deeper
-        terminal history capture for LAST-mode extraction.
+        ``get-text`` for LAST-mode extraction.
 
-        OpenCode renders in alt-screen mode, so history capture may only expose
-        the current viewport. Extraction relies on the within-viewport fallback at
+        OpenCode renders in alt-screen mode, so tmux's history_size stays near 2
+        and get-text returns only the current viewport (~41 lines) regardless
+        of the -S prefix. In current opencode releases this request is therefore
+        a no-op — extraction relies on the within-viewport fallback at
         extract_last_message_from_script (see the ``first_indent`` branch).
 
         The value is retained as belt-and-braces in case opencode ever switches
-        out of alt-screen mode and Zellij exposes deeper scrollback.
+        out of alt-screen mode (at which point the 2000-line capture would start
+        providing the extra scrollback the extraction loop originally expected).
         """
         return 2000
 
@@ -123,7 +126,7 @@ class OpenCodeCliProvider(BaseProvider):
         """Start the OpenCode TUI and wait for the idle splash frame.
 
         Steps:
-        1. Wait for the shell prompt in the Zellij tab.
+        1. Wait for the shell prompt in the kitty window.
         2. Send the inline-env ``opencode --agent <name>`` launch command.
         3. Wait for IDLE or COMPLETED with a 120s timeout to cover the first-run
            ``npm install @opencode-ai/plugin`` blocking period.
@@ -134,11 +137,11 @@ class OpenCodeCliProvider(BaseProvider):
         Raises:
             TimeoutError: If shell or OpenCode doesn't reach IDLE/COMPLETED in time.
         """
-        if not wait_for_shell(zellij_client, self.session_name, self.window_name, timeout=10.0):
+        if not wait_for_shell(tmux_client, self.session_name, self.window_name, timeout=10.0):
             raise TimeoutError("Shell initialization timed out after 10 seconds")
 
         command = self._build_launch_command()
-        zellij_client.send_keys(self.session_name, self.window_name, command)
+        tmux_client.send_keys(self.session_name, self.window_name, command)
 
         # 120s covers first-run npm install (5–30s) and concurrent multi-agent launches.
         if not wait_until_status(
@@ -171,7 +174,7 @@ class OpenCodeCliProvider(BaseProvider):
         return " ".join(env_pairs) + " " + shlex.join(cmd_parts)
 
     def get_status(self, tail_lines: Optional[int] = None) -> TerminalStatus:
-        """Detect current TUI state from the terminal capture buffer.
+        """Detect current TUI state from the terminal scrollback.
 
         Priority order:
         1. WAITING_USER_ANSWER — permission dialog heading present, no idle footer after it
@@ -183,14 +186,12 @@ class OpenCodeCliProvider(BaseProvider):
         5. ERROR — fallback
 
         Args:
-            tail_lines: Lines to capture; None uses the terminal client default.
+            tail_lines: Lines to capture; None uses the tmux_client default.
 
         Returns:
             Current TerminalStatus.
         """
-        output = zellij_client.get_history(
-            self.session_name, self.window_name, tail_lines=tail_lines
-        )
+        output = tmux_client.get_history(self.session_name, self.window_name, tail_lines=tail_lines)
         if not output:
             return TerminalStatus.ERROR
 
@@ -262,7 +263,7 @@ class OpenCodeCliProvider(BaseProvider):
         7. Clean control chars and trailing whitespace.
 
         Args:
-            script_output: Raw terminal output captured from the terminal pane.
+            script_output: Raw terminal output captured from the kitty window.
 
         Returns:
             Extracted agent response text.

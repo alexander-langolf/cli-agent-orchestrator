@@ -1,29 +1,26 @@
-"""Simplified tmux client as module singleton."""
+"""Kitty session client exposed through the legacy terminal-client singleton."""
 
+from __future__ import annotations
+
+import json
 import logging
 import os
+import shlex
 import subprocess
+import threading
 import time
-import uuid
+from pathlib import Path
 from typing import Dict, List, Optional
 
-import libtmux
-
-from cli_agent_orchestrator.constants import TMUX_HISTORY_LINES
+from cli_agent_orchestrator.constants import CAO_HOME_DIR, TMUX_HISTORY_LINES
 from cli_agent_orchestrator.utils.terminal import validate_tmux_name
 
 logger = logging.getLogger(__name__)
 
 
-class TmuxClient:
-    """Simplified tmux client for basic operations."""
+class KittyClient:
+    """Subprocess wrapper around kitty sessions and ``kitten @`` remote control."""
 
-    def __init__(self) -> None:
-        self.server = libtmux.Server()
-
-    # Directories that should never be used as working directories.
-    # Prevents user-supplied paths from pointing at sensitive system locations.
-    # Includes /private/* variants for macOS (where /etc -> /private/etc, etc.).
     _BLOCKED_DIRECTORIES = frozenset(
         {
             "/",
@@ -47,79 +44,6 @@ class TmuxClient:
         }
     )
 
-    def _resolve_and_validate_working_directory(self, working_directory: Optional[str]) -> str:
-        """Resolve and validate working directory.
-
-        Canonicalizes the path (resolves symlinks, normalizes ``..``) and
-        rejects paths that point to sensitive system directories.
-
-        **Allowed directories:**
-
-        - Any real directory that is not a blocked system path
-        - Paths outside ``~/`` are permitted (e.g., ``/Volumes/workplace``,
-          ``/opt/projects``, NFS mounts)
-
-        **Blocked (unsafe) directories:**
-
-        - System directories: ``/``, ``/bin``, ``/sbin``, ``/usr/bin``,
-          ``/usr/sbin``, ``/etc``, ``/var``, ``/tmp``, ``/dev``, ``/proc``,
-          ``/sys``, ``/root``, ``/boot``, ``/lib``, ``/lib64``
-
-        Args:
-            working_directory: Optional directory path, defaults to current directory
-
-        Returns:
-            Canonicalized absolute path
-
-        Raises:
-            ValueError: If directory does not exist or is a blocked system path
-        """
-        if working_directory is None:
-            working_directory = os.getcwd()
-
-        # Expand ~ to the server's home directory so clients can use
-        # portable paths like ~/q/my-project without knowing the server's
-        # actual home path (e.g., /home/user vs /Users/user).
-        working_directory = os.path.expanduser(working_directory)
-
-        # Step 1: Canonicalize the path via realpath to resolve symlinks
-        # and .. sequences.  os.path.realpath is recognized by CodeQL as a
-        # PathNormalization (transitions taint to NormalizedUnchecked).
-        real_path = os.path.realpath(os.path.abspath(working_directory))
-
-        # Step 2: Path-containment guard (CodeQL SafeAccessCheck).
-        # CodeQL's py/path-injection two-state taint model requires:
-        #   1. PathNormalization (realpath above) → NormalizedUnchecked
-        #   2. SafeAccessCheck (startswith guard) → sanitized
-        # CodeQL recognizes str.startswith() as a SafeAccessCheck; when
-        # the true branch flows to filesystem ops, the path is cleared.
-        # The "/" prefix is always true after realpath(), but this
-        # explicit guard satisfies CodeQL and rejects relative paths.
-        if not real_path.startswith("/"):
-            raise ValueError(f"Working directory must be an absolute path: {working_directory}")
-
-        # Step 3: Block sensitive system directories.
-        # Only the exact listed paths are blocked — not their subdirectories.
-        # This prevents launching agents in /etc, /var, /root, etc., while
-        # still allowing legitimate paths like /Volumes/workplace or even
-        # /var/folders (macOS temp) that happen to be under a blocked prefix.
-        if real_path in self._BLOCKED_DIRECTORIES:
-            raise ValueError(
-                f"Working directory not allowed: {working_directory} "
-                f"(resolves to blocked system path {real_path})"
-            )
-
-        # Step 4: Verify the directory actually exists
-        if not os.path.isdir(real_path):
-            raise ValueError(f"Working directory does not exist: {working_directory}")
-
-        return real_path
-
-    # Provider env vars that would cause "nested session" errors when CAO
-    # itself runs inside a provider (e.g. Claude Code), unless explicitly
-    # allow-listed for provider authentication (Bedrock, Vertex AI, Foundry).
-    # Applied to BOTH inherited env and operator-supplied --env vars so a
-    # forwarded ``CLAUDE_CODE_*`` cannot reintroduce nesting.
     _BLOCKED_ENV_PREFIXES = ("CLAUDE", "CODEX_", "__MISE_")
     _BLOCKED_PREFIX_ALLOWLIST = frozenset(
         {
@@ -131,13 +55,126 @@ class TmuxClient:
             "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
         }
     )
-    # Per-var value cap (PR #246) — keeps the full tmux ``new-session -e`` /
-    # ``new-window -e`` argv under the kernel argv limit on busy hosts.
     _MAX_ENV_VALUE_BYTES = 2048
+
+    def __init__(
+        self,
+        command: str | None = None,
+        socket_name: str | None = None,
+        *,
+        kitty_command: str | None = None,
+        kitten_command: str | None = None,
+        socket_dir: str | Path | None = None,
+    ) -> None:
+        self.kitty_command = kitty_command or command or os.environ.get("CAO_KITTY_COMMAND", "kitty")
+        self.kitten_command = kitten_command or os.environ.get("CAO_KITTEN_COMMAND", "kitten")
+        base_socket_dir = socket_dir or os.environ.get("CAO_KITTY_SOCKET_DIR")
+        self.socket_dir = Path(base_socket_dir) if base_socket_dir else CAO_HOME_DIR / "kitty"
+        self.socket_name = socket_name
+        self._log_pipes: dict[tuple[str, str], tuple[threading.Event, threading.Thread]] = {}
+
+    def _command(self, *args: str) -> list[str]:
+        """Build a generic kitten command for compatibility with older callers."""
+        return [self.kitten_command, "@", *args]
+
+    def session_file_path(self, session_name: str) -> Path:
+        validated_session = validate_tmux_name(session_name, "session_name")
+        return self.socket_dir / f"{validated_session}.kitty-session"
+
+    def socket_path(self, session_name: str) -> Path:
+        validated_session = validate_tmux_name(session_name, "session_name")
+        return self.socket_dir / f"{validated_session}.sock"
+
+    def _socket_address(self, session_name: str) -> str:
+        return f"unix:{self.socket_path(session_name)}"
+
+    def _remote_command(self, session_name: str, *args: str) -> list[str]:
+        return [
+            self.kitten_command,
+            "@",
+            "--to",
+            self._socket_address(session_name),
+            *args,
+        ]
+
+    def _run(
+        self,
+        args: list[str],
+        *,
+        session_name: str | None = None,
+        check: bool = True,
+        capture_output: bool = True,
+        text: bool = True,
+        input: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        command = self._remote_command(session_name, *args) if session_name else args
+        logger.debug("Running kitty command: %s", shlex.join(command))
+        return subprocess.run(
+            command,
+            check=check,
+            capture_output=capture_output,
+            text=text,
+            input=input,
+        )
+
+    def _wait_for_session_ready(self, session_name: str, timeout: float = 5.0) -> None:
+        """Wait until the kitty remote-control socket answers."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.session_exists(session_name):
+                return
+            time.sleep(0.1)
+        raise TimeoutError(f"Kitty session '{session_name}' did not become ready")
+
+    def attach_command(self, session_name: str, window_name: str) -> list[str]:
+        """Build a command that focuses a kitty window in a CAO session."""
+        validated_window = validate_tmux_name(window_name, "window_name")
+        return self._remote_command(
+            session_name,
+            "focus-window",
+            "--match",
+            self._window_match(validated_window),
+        )
+
+    def attach_session_command(self, session_name: str) -> list[str]:
+        """Build a command that focuses the first kitty window in a CAO session."""
+        validated_session = validate_tmux_name(session_name, "session_name")
+        return self._remote_command(
+            validated_session,
+            "focus-window",
+            "--match",
+            f"env:CAO_SESSION_NAME={validated_session}",
+        )
+
+    def _window_match(self, window_name: str) -> str:
+        validated_window = validate_tmux_name(window_name, "window_name")
+        return f"env:CAO_WINDOW_NAME={validated_window}"
+
+    def _resolve_and_validate_working_directory(self, working_directory: Optional[str]) -> str:
+        """Resolve and validate working directory."""
+        if working_directory is None:
+            working_directory = os.getcwd()
+
+        working_directory = os.path.expanduser(working_directory)
+        real_path = os.path.realpath(os.path.abspath(working_directory))
+
+        if not real_path.startswith("/"):
+            raise ValueError(f"Working directory must be an absolute path: {working_directory}")
+
+        if real_path in self._BLOCKED_DIRECTORIES:
+            raise ValueError(
+                f"Working directory not allowed: {working_directory} "
+                f"(resolves to blocked system path {real_path})"
+            )
+
+        if not os.path.isdir(real_path):
+            raise ValueError(f"Working directory does not exist: {working_directory}")
+
+        return real_path
 
     @classmethod
     def _is_blocked_env_key(cls, key: str) -> bool:
-        """Return True if ``key`` matches a blocked prefix and isn't allowlisted."""
+        """Return True if ``key`` matches a blocked prefix and is not allowlisted."""
         if key in cls._BLOCKED_PREFIX_ALLOWLIST:
             return False
         return any(key.startswith(p) for p in cls._BLOCKED_ENV_PREFIXES)
@@ -146,12 +183,7 @@ class TmuxClient:
     def _merge_extra_env(
         cls, environment: Dict[str, str], extra_env: Optional[Dict[str, str]]
     ) -> None:
-        """Merge operator-supplied env vars into ``environment`` in place.
-
-        Mirrors the safety constraints applied to inherited env (blocked
-        prefixes, 2048-byte value cap) so a malformed --env entry cannot
-        slip past the validation that runs at the CLI boundary.
-        """
+        """Merge operator-supplied env vars into ``environment`` in place."""
         if not extra_env:
             return
         for key, value in extra_env.items():
@@ -160,12 +192,87 @@ class TmuxClient:
                 continue
             if len(value.encode("utf-8")) >= cls._MAX_ENV_VALUE_BYTES:
                 logger.warning(
-                    "Dropping forwarded env var %s — value exceeds %d bytes",
+                    "Dropping forwarded env var %s - value exceeds %d bytes",
                     key,
                     cls._MAX_ENV_VALUE_BYTES,
                 )
                 continue
             environment[key] = value
+
+    def _base_environment(self, terminal_id: str, extra_env: Optional[Dict[str, str]]) -> Dict[str, str]:
+        essential_keys = {
+            "HOME",
+            "PATH",
+            "SHELL",
+            "USER",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "TERM",
+            "SSH_AUTH_SOCK",
+            "DISPLAY",
+            "XDG_RUNTIME_DIR",
+            "DO_NOT_TRACK",
+        }
+        environment = {
+            k: v
+            for k, v in os.environ.items()
+            if (
+                k in essential_keys
+                or k in self._BLOCKED_PREFIX_ALLOWLIST
+                or (
+                    not self._is_blocked_env_key(k)
+                    and k.startswith(("CAO_", "KIRO_", "MISE_", "AWS_"))
+                    and len(v.encode("utf-8")) < self._MAX_ENV_VALUE_BYTES
+                )
+            )
+        }
+        self._merge_extra_env(environment, extra_env)
+        environment["CAO_TERMINAL_ID"] = terminal_id
+        return environment
+
+    @staticmethod
+    def _session_line(args: list[str]) -> str:
+        return shlex.join(args)
+
+    def _write_session_file(
+        self,
+        session_name: str,
+        window_name: str,
+        terminal_id: str,
+        working_directory: str,
+        environment: Dict[str, str],
+    ) -> Path:
+        self.socket_dir.mkdir(parents=True, exist_ok=True)
+        session_file = self.session_file_path(session_name)
+        launch_args = ["launch", "--title", window_name]
+        for key, value in environment.items():
+            launch_args.extend(["--env", f"{key}={value}"])
+        launch_args.extend(
+            [
+                "--env",
+                f"CAO_SESSION_NAME={session_name}",
+                "--env",
+                f"CAO_WINDOW_NAME={window_name}",
+                "--var",
+                f"cao_session={session_name}",
+                "--var",
+                f"cao_window={window_name}",
+            ]
+        )
+        session_text = "\n".join(
+            [
+                f"os_window_title {session_name}",
+                "os_window_size 220c 50c",
+                "enabled_layouts tall,stack,splits",
+                "layout tall",
+                self._session_line(["cd", working_directory]),
+                self._session_line(launch_args),
+                "",
+            ]
+        )
+        session_file.write_text(session_text, encoding="utf-8")
+        return session_file
 
     def create_session(
         self,
@@ -175,71 +282,38 @@ class TmuxClient:
         working_directory: Optional[str] = None,
         extra_env: Optional[Dict[str, str]] = None,
     ) -> str:
-        """Create detached tmux session with initial window and return window name."""
-        try:
-            working_directory = self._resolve_and_validate_working_directory(working_directory)
-
-            # Only pass essential env vars to avoid tmux "command too long"
-            essential_keys = {
-                "HOME",
-                "PATH",
-                "SHELL",
-                "USER",
-                "LANG",
-                "LC_ALL",
-                "LC_CTYPE",
-                "TERM",
-                "SSH_AUTH_SOCK",
-                "DISPLAY",
-                "XDG_RUNTIME_DIR",
-                "DO_NOT_TRACK",
-            }
-            environment = {
-                k: v
-                for k, v in os.environ.items()
-                if (
-                    k in essential_keys
-                    or k in self._BLOCKED_PREFIX_ALLOWLIST
-                    or (
-                        not self._is_blocked_env_key(k)
-                        and k.startswith(("CAO_", "KIRO_", "MISE_", "AWS_"))
-                        and len(v.encode("utf-8")) < self._MAX_ENV_VALUE_BYTES
-                    )
-                )
-            }
-            # Operator-forwarded vars (from ``cao launch --env``) merge AFTER
-            # the inherited slice and override on key collision, so an
-            # explicit ``--env AWS_REGION=us-west-2`` wins over the inherited
-            # value. See issue #248.
-            self._merge_extra_env(environment, extra_env)
-            environment["CAO_TERMINAL_ID"] = terminal_id
-
-            # Explicit 220x50 pane size avoids the default 80x24 that tmux
-            # assigns to detached sessions. kiro-cli 2.1.x's TUI v2 fails to
-            # repaint after a SIGWINCH from the attach-time resize (80x24 →
-            # user's real terminal): the screen goes blank and input is
-            # silently dropped. Starting at a larger size makes the attach
-            # resize a no-op/shrink, which kiro handles correctly. All other
-            # providers tolerate wider panes. See issue #216.
-            session = self.server.new_session(
-                session_name=session_name,
-                window_name=window_name,
-                start_directory=working_directory,
-                detach=True,
-                environment=environment,
-                x=220,
-                y=50,
-            )
-            logger.info(
-                f"Created tmux session: {session_name} with window: {window_name} in directory: {working_directory}"
-            )
-            window_name_result = session.windows[0].name
-            if window_name_result is None:
-                raise ValueError(f"Window name is None for session {session_name}")
-            return window_name_result
-        except Exception as e:
-            logger.error(f"Failed to create session {session_name}: {e}")
-            raise
+        """Create a kitty session with an initial CAO window and return the window name."""
+        working_directory = self._resolve_and_validate_working_directory(working_directory)
+        validated_session = validate_tmux_name(session_name, "session_name")
+        validated_window = validate_tmux_name(window_name, "window_name")
+        environment = self._base_environment(terminal_id, extra_env)
+        session_file = self._write_session_file(
+            validated_session,
+            validated_window,
+            terminal_id,
+            working_directory,
+            environment,
+        )
+        command = [
+            self.kitty_command,
+            "--detach",
+            "--listen-on",
+            self._socket_address(validated_session),
+            "-o",
+            "allow_remote_control=socket-only",
+            "--session",
+            str(session_file),
+        ]
+        logger.debug("Starting kitty session: %s", shlex.join(command))
+        subprocess.Popen(command)
+        self._wait_for_session_ready(validated_session)
+        logger.info(
+            "Created kitty session: %s with window: %s in directory: %s",
+            validated_session,
+            validated_window,
+            working_directory,
+        )
+        return validated_window
 
     def create_window(
         self,
@@ -250,43 +324,43 @@ class TmuxClient:
         window_shell: Optional[str] = None,
         extra_env: Optional[Dict[str, str]] = None,
     ) -> str:
-        """Create window in session and return window name.
+        """Create a kitty window in an existing CAO session and return the window name."""
+        working_directory = self._resolve_and_validate_working_directory(working_directory)
+        validated_session = validate_tmux_name(session_name, "session_name")
+        validated_window = validate_tmux_name(window_name, "window_name")
 
-        ``extra_env`` carries operator-forwarded vars from
-        ``cao launch --env`` so workers spawned via ``assign`` / ``handoff`` /
-        the web UI inherit the same context as the supervisor. See issue #248.
-        """
-        try:
-            working_directory = self._resolve_and_validate_working_directory(working_directory)
+        if not self.session_exists(validated_session):
+            raise ValueError(f"Session '{validated_session}' not found")
 
-            session = self.server.sessions.get(session_name=session_name)
-            if not session:
-                raise ValueError(f"Session '{session_name}' not found")
+        window_env: dict[str, str] = {}
+        self._merge_extra_env(window_env, extra_env)
+        window_env["CAO_SESSION_NAME"] = validated_session
+        window_env["CAO_WINDOW_NAME"] = validated_window
+        window_env["CAO_TERMINAL_ID"] = terminal_id
 
-            window_env: dict[str, str] = {}
-            self._merge_extra_env(window_env, extra_env)
-            window_env["CAO_TERMINAL_ID"] = terminal_id
+        args = [
+            "launch",
+            "--type=window",
+            "--title",
+            validated_window,
+            "--cwd",
+            working_directory,
+            "--add-to-session",
+            ".",
+        ]
+        for key, value in window_env.items():
+            args.extend(["--env", f"{key}={value}"])
+        if window_shell:
+            args.extend(["sh", "-lc", window_shell])
 
-            kwargs: dict = {
-                "window_name": window_name,
-                "start_directory": working_directory,
-                "environment": window_env,
-            }
-            if window_shell:
-                kwargs["window_shell"] = window_shell
-
-            window = session.new_window(**kwargs)
-
-            logger.info(
-                f"Created window '{window.name}' in session '{session_name}' in directory: {working_directory}"
-            )
-            window_name_result = window.name
-            if window_name_result is None:
-                raise ValueError(f"Window name is None for session {session_name}")
-            return window_name_result
-        except Exception as e:
-            logger.error(f"Failed to create window in session {session_name}: {e}")
-            raise
+        self._run(args, session_name=validated_session)
+        logger.info(
+            "Created window '%s' in kitty session '%s' in directory: %s",
+            validated_window,
+            validated_session,
+            working_directory,
+        )
+        return validated_window
 
     def send_keys(
         self,
@@ -296,166 +370,66 @@ class TmuxClient:
         enter_count: int = 1,
         force_bracketed_paste: bool = False,
     ) -> None:
-        """Send keys to window using tmux paste-buffer for instant delivery.
-
-        Uses load-buffer + paste-buffer instead of chunked send-keys to avoid
-        slow character-by-character input and special character interpretation.
-        The -p flag enables bracketed paste mode so multi-line content is treated
-        as a single input rather than submitting on each newline.
-
-        Args:
-            session_name: Name of tmux session
-            window_name: Name of window in session
-            keys: Text to send
-            enter_count: Number of Enter keys to send after pasting (default 1).
-                Some TUIs enter multi-line mode after bracketed paste,
-                requiring 2 Enters to submit.
-            force_bracketed_paste: If True, unconditionally wrap content in
-                bracketed paste sequences (\x1b[200~...\x1b[201~) instead of
-                relying on paste-buffer -p. Use for message delivery to TUIs.
-                Do NOT use for shell commands sent to bash during initialization
-                (bash 4.x does not support bracketed paste and will inject the
-                escape sequences literally into the command line).
-        """
-        # Defence-in-depth: re-validate at the sink even though callers
-        # validate at the API/MCP boundary. Both halves flow into a
-        # tmux subprocess argument (-t target), and tmux itself parses
-        # ':' / '.' as target delimiters, so any leak past upstream
-        # validation could pivot to a different pane. Validating here
-        # also clears the CodeQL py/command-line-injection data flow.
+        """Send text to a kitty window, then send Enter key presses."""
         validated_session = validate_tmux_name(session_name, "session_name")
-        validated_window = validate_tmux_name(window_name, "window_name")
-        target = f"{validated_session}:{validated_window}"
-        buf_name = f"cao_{uuid.uuid4().hex[:8]}"
-        try:
-            logger.info(f"send_keys: {target} - keys: {keys}")
-            if force_bracketed_paste:
-                # Wrap unconditionally and use -r (no newline→CR conversion).
-                # paste-buffer -p only adds bracketed sequences if tmux tracks
-                # ?2004h for the pane — some TUIs (e.g. current Kiro) don't
-                # send ?2004h so -p is a no-op and \n becomes CR (Enter).
-                buf_content = b"\x1b[200~" + keys.encode() + b"\x1b[201~"
-                paste_flags = ["-r"]
-            else:
-                buf_content = keys.encode()
-                paste_flags = ["-p"]
-            subprocess.run(
-                ["tmux", "load-buffer", "-b", buf_name, "-"],
-                input=buf_content,
-                check=True,
-            )
-            subprocess.run(
-                ["tmux", "paste-buffer"] + paste_flags + ["-b", buf_name, "-t", target],
-                check=True,
-            )
-            # Brief delay to let the TUI process the bracketed paste end sequence
-            # before sending Enter. Without this, some TUIs (e.g., Claude Code 2.x)
-            # swallow the Enter that immediately follows paste-buffer -p.
-            time.sleep(0.3)
-            for i in range(enter_count):
-                if i > 0:
-                    # Delay between Enter presses for TUIs that need time to
-                    # process the previous Enter (e.g., Ink adding a newline)
-                    # before the next Enter triggers form submission.
-                    time.sleep(0.5)
-                subprocess.run(
-                    ["tmux", "send-keys", "-t", target, "Enter"],
-                    check=True,
-                )
-            logger.debug(f"Sent keys to {target}")
-        except Exception as e:
-            logger.error(f"Failed to send keys to {target}: {e}")
-            raise
-        finally:
-            subprocess.run(
-                ["tmux", "delete-buffer", "-b", buf_name],
-                check=False,
-            )
+        match = self._window_match(window_name)
+        bracketed = "enable" if force_bracketed_paste else "disable"
+        self._run(
+            [
+                "send-text",
+                "--match",
+                match,
+                "--stdin",
+                "--bracketed-paste",
+                bracketed,
+            ],
+            session_name=validated_session,
+            input=keys,
+        )
+        time.sleep(0.3)
+        for index in range(enter_count):
+            if index > 0:
+                time.sleep(0.5)
+            self._run(["send-key", "--match", match, "enter"], session_name=validated_session)
+        logger.debug("Sent keys to %s/%s", validated_session, window_name)
 
     def send_keys_via_paste(self, session_name: str, window_name: str, text: str) -> None:
-        """Send text to window via tmux paste buffer with bracketed paste mode.
+        """Send text to a kitty window using the standard text path."""
+        self.send_keys(session_name, window_name, text)
 
-        Uses tmux set-buffer + paste-buffer -p to send text as a bracketed paste,
-        which bypasses TUI hotkey handling. Essential for Ink-based CLIs and
-        other TUI apps where individual keystrokes may trigger hotkeys.
-
-        After pasting, sends C-m (Enter) to submit the input.
-
-        Args:
-            session_name: Name of tmux session
-            window_name: Name of window in session
-            text: Text to paste into the pane
-        """
-        try:
-            logger.info(
-                f"send_keys_via_paste: {session_name}:{window_name} - text length: {len(text)}"
-            )
-
-            session = self.server.sessions.get(session_name=session_name)
-            if not session:
-                raise ValueError(f"Session '{session_name}' not found")
-
-            window = session.windows.get(window_name=window_name)
-            if not window:
-                raise ValueError(f"Window '{window_name}' not found in session '{session_name}'")
-
-            pane = window.active_pane
-            if pane:
-                buf_name = "cao_paste"
-
-                # Load text into tmux buffer
-                self.server.cmd("set-buffer", "-b", buf_name, text)
-
-                # Paste with bracketed paste mode (-p flag).
-                # This wraps the text in \x1b[200~ ... \x1b[201~ escape sequences,
-                # telling the TUI "this is pasted text" so it bypasses hotkey handling.
-                pane.cmd("paste-buffer", "-p", "-b", buf_name)
-
-                time.sleep(0.3)
-
-                # Send Enter to submit the pasted text
-                pane.send_keys("C-m", enter=False)
-
-                # Clean up the paste buffer
-                try:
-                    self.server.cmd("delete-buffer", "-b", buf_name)
-                except Exception:
-                    pass
-
-                logger.debug(f"Sent text via paste to {session_name}:{window_name}")
-        except Exception as e:
-            logger.error(f"Failed to send text via paste to {session_name}:{window_name}: {e}")
-            raise
+    @staticmethod
+    def _normalize_key(key: str) -> str:
+        if key.startswith("C-"):
+            return f"ctrl+{key[2:].lower()}"
+        if key.startswith("M-"):
+            return f"alt+{key[2:].lower()}"
+        return key.lower()
 
     def send_special_key(self, session_name: str, window_name: str, key: str) -> None:
-        """Send a tmux special key sequence (e.g., C-d, C-c) to a window.
+        """Send a special key sequence to a kitty window."""
+        validated_session = validate_tmux_name(session_name, "session_name")
+        self._run(
+            ["send-key", "--match", self._window_match(window_name), self._normalize_key(key)],
+            session_name=validated_session,
+        )
+        logger.debug("Sent special key to %s/%s", validated_session, window_name)
 
-        Unlike send_keys(), this sends the key as a tmux key name (not literal text)
-        and does not append a carriage return. Used for control signals like Ctrl+D (EOF).
-
-        Args:
-            session_name: Name of tmux session
-            window_name: Name of window in session
-            key: Tmux key name (e.g., "C-d", "C-c", "Escape")
-        """
-        try:
-            logger.info(f"send_special_key: {session_name}:{window_name} - key: {key}")
-
-            session = self.server.sessions.get(session_name=session_name)
-            if not session:
-                raise ValueError(f"Session '{session_name}' not found")
-
-            window = session.windows.get(window_name=window_name)
-            if not window:
-                raise ValueError(f"Window '{window_name}' not found in session '{session_name}'")
-
-            pane = window.active_pane
-            if pane:
-                pane.send_keys(key, enter=False)
-                logger.debug(f"Sent special key to {session_name}:{window_name}")
-        except Exception as e:
-            logger.error(f"Failed to send special key to {session_name}:{window_name}: {e}")
-            raise
+    def send_literal_keys(self, session_name: str, window_name: str, keys: str) -> None:
+        """Send literal bytes/escape sequences to a kitty window."""
+        validated_session = validate_tmux_name(session_name, "session_name")
+        self._run(
+            [
+                "send-text",
+                "--match",
+                self._window_match(window_name),
+                "--stdin",
+                "--bracketed-paste",
+                "disable",
+            ],
+            session_name=validated_session,
+            input=keys,
+        )
+        logger.debug("Sent literal keys to %s/%s", validated_session, window_name)
 
     def get_history(
         self,
@@ -465,207 +439,230 @@ class TmuxClient:
         strip_escapes: bool = False,
         full_history: bool = False,
     ) -> str:
-        """Get window history.
-
-        Args:
-            session_name: Name of tmux session
-            window_name: Name of window in session
-            tail_lines: Number of lines to capture from end (default: TMUX_HISTORY_LINES)
-            strip_escapes: If True, capture plain text without ANSI escape sequences
-            full_history: If True, capture entire scrollback buffer (overrides tail_lines)
-        """
-        try:
-            session = self.server.sessions.get(session_name=session_name)
-            if not session:
-                raise ValueError(f"Session '{session_name}' not found")
-
-            window = session.windows.get(window_name=window_name)
-            if not window:
-                raise ValueError(f"Window '{window_name}' not found in session '{session_name}'")
-
-            # Use cmd to run capture-pane with -e (escape sequences) and -p (print) flags
-            pane = window.panes[0]
-            if full_history:
-                # "-S -" captures from the start of the scrollback buffer
-                flags = ["-p", "-S", "-"]
-            else:
-                lines = tail_lines if tail_lines is not None else TMUX_HISTORY_LINES
-                flags = ["-p", "-S", f"-{lines}"]
-            if not strip_escapes:
-                flags = ["-e"] + flags
-            result = pane.cmd("capture-pane", *flags)
-            # Join all lines with newlines to get complete output
-            return "\n".join(result.stdout) if result.stdout else ""
-        except Exception as e:
-            logger.error(f"Failed to get history from {session_name}:{window_name}: {e}")
-            raise
+        """Get window text from kitty scrollback."""
+        validated_session = validate_tmux_name(session_name, "session_name")
+        args = [
+            "get-text",
+            "--match",
+            self._window_match(window_name),
+            "--extent",
+            "all",
+        ]
+        if not strip_escapes:
+            args.append("--ansi")
+        result = self._run(args, session_name=validated_session)
+        output = (result.stdout or "").rstrip("\n")
+        if full_history:
+            return output
+        lines = tail_lines if tail_lines is not None else TMUX_HISTORY_LINES
+        return "\n".join(output.splitlines()[-lines:])
 
     def list_sessions(self) -> List[Dict[str, str]]:
-        """List all tmux sessions."""
-        try:
-            sessions: List[Dict[str, str]] = []
-            for session in self.server.sessions:
-                # Check if session has attached clients
-                is_attached = len(getattr(session, "attached_sessions", [])) > 0
-
-                session_name = session.name if session.name is not None else ""
-                sessions.append(
-                    {
-                        "id": session_name,
-                        "name": session_name,
-                        "status": "active" if is_attached else "detached",
-                    }
-                )
-
-            return sessions
-        except Exception as e:
-            logger.error(f"Failed to list sessions: {e}")
+        """List active CAO kitty sessions discovered from socket files."""
+        if not self.socket_dir.exists():
             return []
+        sessions: List[Dict[str, str]] = []
+        for socket_path in sorted(self.socket_dir.glob("*.sock")):
+            session_name = socket_path.stem
+            try:
+                result = self._run(["ls"], session_name=session_name, check=False)
+            except Exception as e:
+                logger.debug("Failed to query kitty session %s: %s", session_name, e)
+                continue
+            if result.returncode == 0:
+                sessions.append({"id": session_name, "name": session_name, "status": "active"})
+        return sessions
+
+    @staticmethod
+    def _iter_windows(tree: object):
+        if not isinstance(tree, list):
+            return
+        for os_window in tree:
+            if not isinstance(os_window, dict):
+                continue
+            for tab in os_window.get("tabs", []):
+                if not isinstance(tab, dict):
+                    continue
+                for window in tab.get("windows", []):
+                    if isinstance(window, dict):
+                        yield window
+
+    def _list_window_tree(self, session_name: str) -> object:
+        result = self._run(["ls", "--all-env-vars"], session_name=session_name)
+        try:
+            return json.loads(result.stdout or "[]")
+        except json.JSONDecodeError:
+            logger.warning("Failed to parse kitty ls output for session %s", session_name)
+            return []
+
+    def _find_window(self, session_name: str, window_name: str) -> Optional[dict]:
+        validated_window = validate_tmux_name(window_name, "window_name")
+        tree = self._list_window_tree(session_name)
+        for window in self._iter_windows(tree):
+            env = window.get("env", {})
+            if env.get("CAO_WINDOW_NAME") == validated_window or window.get("title") == validated_window:
+                return window
+        return None
 
     def get_session_windows(self, session_name: str) -> List[Dict[str, str]]:
-        """Get all windows in a session."""
+        """Get all CAO windows in a kitty session."""
+        validated_session = validate_tmux_name(session_name, "session_name")
         try:
-            session = self.server.sessions.get(session_name=session_name)
-            if not session:
-                return []
-
-            windows: List[Dict[str, str]] = []
-            for window in session.windows:
-                window_name = window.name if window.name is not None else ""
-                windows.append({"name": window_name, "index": str(window.index)})
-
-            return windows
+            tree = self._list_window_tree(validated_session)
         except Exception as e:
-            logger.error(f"Failed to get windows for session {session_name}: {e}")
+            logger.error("Failed to get windows for session %s: %s", validated_session, e)
             return []
 
+        windows: List[Dict[str, str]] = []
+        for index, window in enumerate(self._iter_windows(tree)):
+            env = window.get("env", {})
+            name = env.get("CAO_WINDOW_NAME") or window.get("title")
+            if name:
+                windows.append({"name": str(name), "index": str(index)})
+        return windows
+
     def kill_session(self, session_name: str) -> bool:
-        """Kill tmux session."""
-        try:
-            session = self.server.sessions.get(session_name=session_name)
-            if session:
-                session.kill()
-                logger.info(f"Killed tmux session: {session_name}")
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"Failed to kill session {session_name}: {e}")
-            return False
+        """Close all kitty windows in a CAO session."""
+        validated_session = validate_tmux_name(session_name, "session_name")
+        result = self._run(
+            [
+                "close-window",
+                "--match",
+                f"env:CAO_SESSION_NAME={validated_session}",
+                "--ignore-no-match",
+            ],
+            session_name=validated_session,
+            check=False,
+        )
+        for path in (self.socket_path(validated_session), self.session_file_path(validated_session)):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        if result.returncode == 0:
+            logger.info("Killed kitty session: %s", validated_session)
+            return True
+        return False
 
     def kill_window(self, session_name: str, window_name: str) -> bool:
-        """Kill a specific tmux window within a session."""
-        try:
-            session = self.server.sessions.get(session_name=session_name)
-            if not session:
-                return False
-            window = session.windows.get(window_name=window_name)
-            if window:
-                window.kill()
-                logger.info(f"Killed tmux window: {session_name}:{window_name}")
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"Failed to kill window {session_name}:{window_name}: {e}")
-            return False
+        """Close a specific kitty window within a session."""
+        validated_session = validate_tmux_name(session_name, "session_name")
+        result = self._run(
+            [
+                "close-window",
+                "--match",
+                self._window_match(window_name),
+                "--ignore-no-match",
+            ],
+            session_name=validated_session,
+            check=False,
+        )
+        if result.returncode == 0:
+            logger.info("Killed kitty window: %s/%s", validated_session, window_name)
+            return True
+        return False
 
     def session_exists(self, session_name: str) -> bool:
-        """Check if session exists."""
-        try:
-            session = self.server.sessions.get(session_name=session_name)
-            return session is not None
-        except Exception:
-            return False
+        """Check whether the kitty remote-control socket responds."""
+        validated_session = validate_tmux_name(session_name, "session_name")
+        result = self._run(["ls"], session_name=validated_session, check=False)
+        return result.returncode == 0
 
     def get_pane_working_directory(self, session_name: str, window_name: str) -> Optional[str]:
-        """Get the current working directory of a pane."""
+        """Get the current working directory for a kitty window."""
         try:
-            session = self.server.sessions.get(session_name=session_name)
-            if not session:
-                return None
-
-            window = session.windows.get(window_name=window_name)
+            window = self._find_window(session_name, window_name)
             if not window:
                 return None
-
-            pane = window.active_pane
-            if pane:
-                # Get pane_current_path from tmux
-                result = pane.cmd("display-message", "-p", "#{pane_current_path}")
-                if result.stdout:
-                    return result.stdout[0].strip()
-            return None
+            foreground_processes = window.get("foreground_processes")
+            if isinstance(foreground_processes, list):
+                for process in foreground_processes:
+                    if isinstance(process, dict) and process.get("cwd"):
+                        return str(process["cwd"])
+            output = window.get("cwd")
+            return str(output) if output else None
         except Exception as e:
-            logger.error(f"Failed to get working directory for {session_name}:{window_name}: {e}")
+            logger.error("Failed to get working directory for %s/%s: %s", session_name, window_name, e)
             return None
 
     def get_pane_current_command(self, session_name: str, window_name: str) -> Optional[str]:
-        """Get the current foreground command running in a pane."""
+        """Get the command line reported by kitty for a window."""
         try:
-            session = self.server.sessions.get(session_name=session_name)
-            if not session:
-                return None
-            window = session.windows.get(window_name=window_name)
+            window = self._find_window(session_name, window_name)
             if not window:
                 return None
-            pane = window.active_pane
-            if pane:
-                result = pane.cmd("display-message", "-p", "#{pane_current_command}")
-                if result.stdout:
-                    return result.stdout[0].strip()
+            foreground_processes = window.get("foreground_processes")
+            if isinstance(foreground_processes, list):
+                for process in foreground_processes:
+                    if isinstance(process, dict):
+                        process_cmdline = process.get("cmdline")
+                        if isinstance(process_cmdline, list) and process_cmdline:
+                            return Path(str(process_cmdline[0])).name
+                        if isinstance(process_cmdline, str) and process_cmdline:
+                            return Path(process_cmdline.split()[0]).name
+            cmdline = window.get("cmdline")
+            if isinstance(cmdline, list) and cmdline:
+                return Path(str(cmdline[0])).name
+            if isinstance(cmdline, str) and cmdline:
+                return Path(cmdline.split()[0]).name
             return None
         except Exception as e:
-            logger.error(f"Failed to get pane command for {session_name}:{window_name}: {e}")
+            logger.error("Failed to get pane command for %s/%s: %s", session_name, window_name, e)
             return None
 
     def pipe_pane(self, session_name: str, window_name: str, file_path: str) -> None:
-        """Start piping pane output to file.
+        """Continuously mirror kitty scrollback into a log file for watchdog consumers."""
+        validated_session = validate_tmux_name(session_name, "session_name")
+        validated_window = validate_tmux_name(window_name, "window_name")
+        path = Path(file_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        self.stop_pipe_pane(validated_session, validated_window)
 
-        Args:
-            session_name: Tmux session name
-            window_name: Tmux window name
-            file_path: Absolute path to log file
-        """
-        try:
-            session = self.server.sessions.get(session_name=session_name)
-            if not session:
-                raise ValueError(f"Session '{session_name}' not found")
+        stop_event = threading.Event()
 
-            window = session.windows.get(window_name=window_name)
-            if not window:
-                raise ValueError(f"Window '{window_name}' not found in session '{session_name}'")
+        def poll_scrollback() -> None:
+            last_output: str | None = None
+            while not stop_event.is_set():
+                try:
+                    output = self.get_history(
+                        validated_session,
+                        validated_window,
+                        strip_escapes=True,
+                        full_history=True,
+                    )
+                    if output != last_output:
+                        path.write_text(output, encoding="utf-8")
+                        last_output = output
+                except Exception as e:
+                    logger.debug(
+                        "Failed to mirror kitty scrollback for %s/%s: %s",
+                        validated_session,
+                        validated_window,
+                        e,
+                    )
+                stop_event.wait(0.5)
 
-            pane = window.active_pane
-            if pane:
-                pane.cmd("pipe-pane", "-o", f"cat >> {file_path}")
-                logger.info(f"Started pipe-pane for {session_name}:{window_name} to {file_path}")
-        except Exception as e:
-            logger.error(f"Failed to start pipe-pane for {session_name}:{window_name}: {e}")
-            raise
+        thread = threading.Thread(
+            target=poll_scrollback,
+            name=f"cao-kitty-log-{validated_session}-{validated_window}",
+            daemon=True,
+        )
+        self._log_pipes[(validated_session, validated_window)] = (stop_event, thread)
+        thread.start()
+        logger.info("Started kitty log mirror for %s/%s at %s", session_name, window_name, file_path)
 
     def stop_pipe_pane(self, session_name: str, window_name: str) -> None:
-        """Stop piping pane output.
-
-        Args:
-            session_name: Tmux session name
-            window_name: Tmux window name
-        """
-        try:
-            session = self.server.sessions.get(session_name=session_name)
-            if not session:
-                raise ValueError(f"Session '{session_name}' not found")
-
-            window = session.windows.get(window_name=window_name)
-            if not window:
-                raise ValueError(f"Window '{window_name}' not found in session '{session_name}'")
-
-            pane = window.active_pane
-            if pane:
-                pane.cmd("pipe-pane")
-                logger.info(f"Stopped pipe-pane for {session_name}:{window_name}")
-        except Exception as e:
-            logger.error(f"Failed to stop pipe-pane for {session_name}:{window_name}: {e}")
-            raise
+        """Stop the kitty scrollback mirror for a window."""
+        validated_session = validate_tmux_name(session_name, "session_name")
+        validated_window = validate_tmux_name(window_name, "window_name")
+        pipe = self._log_pipes.pop((validated_session, validated_window), None)
+        if pipe:
+            stop_event, thread = pipe
+            stop_event.set()
+            if thread.is_alive():
+                thread.join(timeout=1.0)
+        logger.info("Stopped kitty log mirror for %s/%s", validated_session, validated_window)
 
 
-# Module-level singleton
-tmux_client = TmuxClient()
+tmux_client = KittyClient()

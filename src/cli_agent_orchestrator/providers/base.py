@@ -5,7 +5,7 @@ A "provider" is an adapter that enables CAO to interact with a specific CLI-base
 AI agent (e.g., Kiro CLI, Claude Code, Codex, Q CLI).
 
 Provider Responsibilities:
-- Initialize the CLI tool in a Zellij tab (run startup commands)
+- Initialize the CLI tool in a kitty window (run startup commands)
 - Detect terminal state by parsing terminal output (IDLE, PROCESSING, COMPLETED, etc.)
 - Extract agent responses from terminal output
 - Provide cleanup logic when terminal is deleted
@@ -35,8 +35,8 @@ class BaseProvider(ABC):
 
     Attributes:
         terminal_id: Unique identifier for the terminal this provider manages
-        session_name: Name of the Zellij session containing the terminal
-        window_name: Name of the Zellij tab containing the terminal
+        session_name: Name of the kitty session containing the terminal
+        window_name: Name of the kitty window containing the terminal
         _status: Internal status cache (use get_status() for current status)
         _allowed_tools: CAO-vocabulary tool names this agent is allowed to use
     """
@@ -53,8 +53,8 @@ class BaseProvider(ABC):
 
         Args:
             terminal_id: Unique identifier for this terminal instance
-            session_name: Name of the Zellij session
-            window_name: Name of the Zellij tab
+            session_name: Name of the kitty session
+            window_name: Name of the kitty window
             allowed_tools: Optional list of CAO tool names the agent is allowed to use
             skill_prompt: Optional skill catalog text built by the service layer.
                 Providers append this to the system prompt when building their CLI command.
@@ -150,7 +150,7 @@ class BaseProvider(ABC):
 
         TUI-based providers (e.g. Gemini CLI's Ink renderer) may show
         notification spinners that temporarily obscure response text in
-        the Zellij history capture buffer.  Override this to enable automatic retries
+        the terminal scrollback.  Override this to enable automatic retries
         with re-capture between attempts.  Default is 0 (no retries).
         """
         return 0

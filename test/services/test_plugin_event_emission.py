@@ -13,12 +13,14 @@ from cli_agent_orchestrator.plugins import (
     PostKillSessionEvent,
     PostKillTerminalEvent,
     PostSendMessageEvent,
+    PostTerminalInterruptedEvent,
 )
 from cli_agent_orchestrator.services.inbox_service import check_and_send_pending_messages
 from cli_agent_orchestrator.services.session_service import create_session, delete_session
 from cli_agent_orchestrator.services.terminal_service import (
     create_terminal,
     delete_terminal,
+    monitor_terminal_interruptions,
     send_input,
 )
 
@@ -321,6 +323,14 @@ class TestMessagePluginEvents:
         )
 
         assert delivered is True
+        from cli_agent_orchestrator.services import terminal_service as terminal_service_module
+
+        with terminal_service_module._terminal_status_lock:
+            assert (
+                terminal_service_module._terminal_last_status["abcd1234"]
+                == TerminalStatus.PROCESSING
+            )
+            terminal_service_module._terminal_last_status.pop("abcd1234", None)
         assert call_order[-1] == "dispatch"
         event_type, event = registry.dispatch.await_args.args
         assert event_type == "post_send_message"
@@ -357,6 +367,91 @@ class TestMessagePluginEvents:
                 orchestration_type="assign",
             )
 
+        registry.dispatch.assert_not_awaited()
+
+
+class TestTerminalInterruptedPluginEvents:
+    """Verify unexpected terminal loss emits an interruption event."""
+
+    @patch("cli_agent_orchestrator.services.terminal_service.db_delete_terminal")
+    @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
+    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.list_all_terminals")
+    def test_monitor_dispatches_when_processing_window_disappears(
+        self, mock_list_all, mock_tmux, mock_provider_manager, mock_db_delete
+    ):
+        registry = _registry_mock()
+        terminal = {
+            "id": "abcd1234",
+            "tmux_session": "cao-demo",
+            "tmux_window": "developer-abcd",
+            "provider": "kiro_cli",
+            "agent_profile": "developer",
+        }
+        mock_list_all.return_value = [terminal]
+        mock_tmux.session_exists.return_value = True
+        mock_tmux.get_session_windows.side_effect = [
+            [{"name": "developer-abcd"}],
+            [],
+        ]
+        provider = MagicMock()
+        provider.get_status.return_value = TerminalStatus.PROCESSING
+        mock_provider_manager.get_provider.return_value = provider
+        mock_db_delete.return_value = True
+
+        assert monitor_terminal_interruptions(registry=registry) == []
+        registry.dispatch.assert_not_awaited()
+
+        interrupted = monitor_terminal_interruptions(registry=registry)
+
+        assert interrupted == ["abcd1234"]
+        mock_tmux.stop_pipe_pane.assert_called_once_with("cao-demo", "developer-abcd")
+        mock_provider_manager.cleanup_provider.assert_called_once_with("abcd1234")
+        mock_db_delete.assert_called_once_with("abcd1234")
+        registry.dispatch.assert_awaited_once()
+        event_type, event = registry.dispatch.await_args.args
+        assert event_type == "post_terminal_interrupted"
+        assert isinstance(event, PostTerminalInterruptedEvent)
+        assert event.session_id == "cao-demo"
+        assert event.terminal_id == "abcd1234"
+        assert event.agent_name == "developer"
+        assert event.provider == "kiro_cli"
+        assert event.reason == "window_closed"
+        assert event.previous_status == "processing"
+
+    @patch("cli_agent_orchestrator.services.terminal_service.db_delete_terminal")
+    @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
+    @patch("cli_agent_orchestrator.services.terminal_service.tmux_client")
+    @patch("cli_agent_orchestrator.services.terminal_service.list_all_terminals")
+    def test_monitor_cleans_closed_idle_window_without_interrupted_event(
+        self, mock_list_all, mock_tmux, mock_provider_manager, mock_db_delete
+    ):
+        registry = _registry_mock()
+        mock_list_all.return_value = [
+            {
+                "id": "abcd1234",
+                "tmux_session": "cao-demo",
+                "tmux_window": "developer-abcd",
+                "provider": "kiro_cli",
+                "agent_profile": "developer",
+            }
+        ]
+        mock_tmux.session_exists.return_value = True
+        mock_tmux.get_session_windows.side_effect = [
+            [{"name": "developer-abcd"}],
+            [],
+        ]
+        provider = MagicMock()
+        provider.get_status.return_value = TerminalStatus.IDLE
+        mock_provider_manager.get_provider.return_value = provider
+        mock_db_delete.return_value = True
+
+        monitor_terminal_interruptions(registry=registry)
+        interrupted = monitor_terminal_interruptions(registry=registry)
+
+        assert interrupted == []
+        mock_provider_manager.cleanup_provider.assert_called_once_with("abcd1234")
+        mock_db_delete.assert_called_once_with("abcd1234")
         registry.dispatch.assert_not_awaited()
 
     @patch("cli_agent_orchestrator.services.inbox_service.update_message_status")

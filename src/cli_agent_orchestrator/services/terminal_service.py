@@ -1,18 +1,18 @@
 """Terminal service with workflow functions.
 
 This module provides high-level terminal management operations that orchestrate
-multiple components (database, tmux, providers) to create a unified terminal
+multiple components (database, kitty, providers) to create a unified terminal
 abstraction for CLI agents.
 
 Key Responsibilities:
 - Terminal lifecycle management (create, get, delete)
 - Provider initialization and cleanup
-- Tmux session/window management
+- Kitty session/window management
 - Terminal output capture and message extraction
 
 Terminal Workflow:
-1. create_terminal() → Creates tmux window, initializes provider, starts logging
-2. send_input() → Sends user message to the agent via tmux
+1. create_terminal() → Creates kitty window, initializes provider, starts logging
+2. send_input() → Sends user message to the agent via kitty
 3. get_output() → Retrieves agent response from terminal history
 4. delete_terminal() → Cleans up provider, database record, and logging
 """
@@ -28,6 +28,7 @@ from cli_agent_orchestrator.clients.database import create_terminal as db_create
 from cli_agent_orchestrator.clients.database import delete_terminal as db_delete_terminal
 from cli_agent_orchestrator.clients.database import (
     get_terminal_metadata,
+    list_all_terminals,
     update_last_active,
     update_terminal_shell_command,
 )
@@ -41,6 +42,7 @@ from cli_agent_orchestrator.plugins import (
     PostCreateTerminalEvent,
     PostKillTerminalEvent,
     PostSendMessageEvent,
+    PostTerminalInterruptedEvent,
 )
 from cli_agent_orchestrator.providers.manager import provider_manager
 from cli_agent_orchestrator.services.memory_service import MemoryService
@@ -63,6 +65,12 @@ logger = logging.getLogger(__name__)
 # Track terminals that have already received memory injection (first message only).
 _memory_injected_terminals: set = set()
 _memory_injected_lock = threading.Lock()
+_terminal_last_status: dict[str, TerminalStatus] = {}
+_terminal_status_lock = threading.Lock()
+_INTERRUPTED_STATUSES = {
+    TerminalStatus.PROCESSING,
+    TerminalStatus.WAITING_USER_ANSWER,
+}
 
 
 def inject_memory_context(first_message: str, terminal_id: str) -> str:
@@ -128,16 +136,16 @@ def create_terminal(
 
     This function orchestrates the complete terminal creation workflow:
     1. Generate unique terminal ID and window name
-    2. Create tmux session/window (new or existing)
+    2. Create kitty session/window (new or existing)
     3. Save terminal metadata to database
     4. Initialize the CLI provider (starts the agent)
-    5. Set up terminal logging via tmux pipe-pane
+    5. Prepare terminal logging hooks
 
     Args:
         provider: Provider type string (e.g., "kiro_cli", "claude_code")
         agent_profile: Name of the agent profile to use
         session_name: Optional custom session name. If not provided, auto-generated.
-        new_session: If True, creates a new tmux session. If False, adds to existing.
+        new_session: If True, creates a new kitty session. If False, adds to existing.
         working_directory: Optional working directory for the terminal shell
         env_vars: Operator-forwarded env vars (``cao launch --env``). On
             ``new_session=True``, these are stored on the session record and
@@ -153,7 +161,7 @@ def create_terminal(
         ValueError: If session already exists (new_session=True) or not found (new_session=False)
         TimeoutError: If provider initialization times out
     """
-    session_created = False  # tracks whether THIS call created the tmux session
+    session_created = False  # tracks whether THIS call created the terminal session
     try:
         # Step 1: Generate unique identifiers
         terminal_id = generate_terminal_id()
@@ -163,7 +171,7 @@ def create_terminal(
 
         window_name = generate_window_name(agent_profile)
 
-        # Step 2: Create tmux session or window
+        # Step 2: Create kitty session or window
         if new_session:
             # Ensure session name has the CAO prefix for identification
             if not session_name.startswith(SESSION_PREFIX):
@@ -177,7 +185,7 @@ def create_terminal(
             # may have left behind, so a no-env relaunch can't inherit them.
             clear_session_env(session_name)
 
-            # Create new tmux session with initial window
+            # Create new kitty session with initial window
             tmux_client.create_session(
                 session_name,
                 window_name,
@@ -187,7 +195,7 @@ def create_terminal(
             )
             session_created = True  # only set after successful creation
 
-            # Persist forwarded env only after the tmux session actually
+            # Persist forwarded env only after the kitty session actually
             # exists; the failure path below clears it if a later step
             # tears the session back down.
             if env_vars:
@@ -257,8 +265,7 @@ def create_terminal(
         if shell_command:
             update_terminal_shell_command(terminal_id, shell_command)
 
-        # Step 5: Set up terminal logging via tmux pipe-pane
-        # This captures all terminal output to a log file for inbox monitoring
+        # Step 5: Prepare terminal logging hook for inbox monitoring.
         log_path = TERMINAL_LOG_DIR / f"{terminal_id}.log"
         log_path.touch()  # Ensure file exists before watching
         tmux_client.pipe_pane(session_name, window_name, str(log_path))
@@ -338,6 +345,123 @@ def get_terminal(terminal_id: str) -> Dict:
         raise
 
 
+def _coerce_terminal_status(status_value) -> TerminalStatus | None:
+    """Convert provider status values to TerminalStatus when possible."""
+    if isinstance(status_value, TerminalStatus):
+        return status_value
+    try:
+        return TerminalStatus(status_value)
+    except Exception:
+        return None
+
+
+def _remember_terminal_status(terminal_id: str) -> None:
+    """Record the latest observable provider status for interruption detection."""
+    try:
+        provider = provider_manager.get_provider(terminal_id)
+        if provider is None:
+            return
+        status = _coerce_terminal_status(provider.get_status())
+        if status is None:
+            return
+        with _terminal_status_lock:
+            _terminal_last_status[terminal_id] = status
+    except Exception as e:
+        logger.debug("Failed to record terminal status for %s: %s", terminal_id, e)
+
+
+def _terminal_missing_reason(metadata: dict) -> str | None:
+    """Return why a terminal disappeared, or None when it is still present."""
+    session_name = metadata["tmux_session"]
+    window_name = metadata["tmux_window"]
+    if not tmux_client.session_exists(session_name):
+        return "session_closed"
+    windows = tmux_client.get_session_windows(session_name)
+    if not any(window.get("name") == window_name for window in windows):
+        return "window_closed"
+    return None
+
+
+def _cleanup_interrupted_terminal(metadata: dict) -> None:
+    """Drop runtime metadata for a terminal that no longer exists in kitty."""
+    terminal_id = metadata["id"]
+    try:
+        tmux_client.stop_pipe_pane(metadata["tmux_session"], metadata["tmux_window"])
+    except Exception as e:
+        logger.debug("Failed to stop terminal logging for interrupted %s: %s", terminal_id, e)
+
+    provider_manager.cleanup_provider(terminal_id)
+    with _memory_injected_lock:
+        _memory_injected_terminals.discard(terminal_id)
+
+    try:
+        from cli_agent_orchestrator.services.memory_service import _curator_locks
+
+        _curator_locks.pop(terminal_id, None)
+    except Exception:
+        pass
+
+    db_delete_terminal(terminal_id)
+
+
+def monitor_terminal_interruptions(registry: PluginRegistry | None = None) -> list[str]:
+    """Detect unexpectedly closed active terminals and emit interruption events.
+
+    Returns terminal IDs that emitted ``post_terminal_interrupted`` during this scan.
+    Closed idle/completed/error terminals are cleaned up without the interruption event.
+    """
+    interrupted: list[str] = []
+    for metadata in list_all_terminals():
+        terminal_id = metadata["id"]
+        try:
+            reason = _terminal_missing_reason(metadata)
+        except Exception as e:
+            logger.debug("Failed to inspect terminal %s: %s", terminal_id, e)
+            continue
+
+        if reason is None:
+            _remember_terminal_status(terminal_id)
+            continue
+
+        with _terminal_status_lock:
+            previous_status = _terminal_last_status.pop(terminal_id, None)
+
+        try:
+            _cleanup_interrupted_terminal(metadata)
+        except Exception as e:
+            logger.warning("Failed to clean interrupted terminal %s: %s", terminal_id, e)
+            continue
+
+        if previous_status not in _INTERRUPTED_STATUSES:
+            logger.info(
+                "Cleaned closed terminal %s without interruption event (last_status=%s)",
+                terminal_id,
+                previous_status.value if previous_status else None,
+            )
+            continue
+
+        dispatch_plugin_event(
+            registry,
+            "post_terminal_interrupted",
+            PostTerminalInterruptedEvent(
+                session_id=metadata["tmux_session"],
+                terminal_id=terminal_id,
+                agent_name=metadata.get("agent_profile"),
+                provider=metadata.get("provider", ""),
+                reason=reason,
+                previous_status=previous_status.value,
+            ),
+        )
+        interrupted.append(terminal_id)
+        logger.warning(
+            "Terminal %s interrupted: %s while status was %s",
+            terminal_id,
+            reason,
+            previous_status.value,
+        )
+    return interrupted
+
+
 def get_working_directory(terminal_id: str) -> Optional[str]:
     """Get the current working directory of a terminal's pane.
 
@@ -414,6 +538,13 @@ def send_input(
         # state and resume normal COMPLETED detection after a real task.
         if provider:
             provider.mark_input_received()
+            try:
+                exit_command = provider.exit_cli()
+            except Exception:
+                exit_command = None
+            if original_message != exit_command:
+                with _terminal_status_lock:
+                    _terminal_last_status[terminal_id] = TerminalStatus.PROCESSING
 
         update_last_active(terminal_id)
         logger.info(f"Sent input to terminal: {terminal_id}")
@@ -437,14 +568,14 @@ def send_input(
 
 
 def send_special_key(terminal_id: str, key: str) -> bool:
-    """Send a tmux special key sequence (e.g., C-d, C-c) to terminal.
+    """Send a kitty special key sequence (e.g., C-d, C-c) to terminal.
 
-    Unlike send_input(), this sends the key as a tmux key name (not literal text)
+    Unlike send_input(), this sends the key as a terminal key name (not literal text)
     and does not append a carriage return. Used for control signals like Ctrl+D (EOF).
 
     Args:
         terminal_id: Target terminal identifier
-        key: Tmux key name (e.g., "C-d", "C-c", "Escape")
+        key: Kitty key name (e.g., "C-d", "C-c", "Escape")
 
     Returns:
         True if the key was sent successfully
@@ -474,12 +605,12 @@ def get_output(terminal_id: str, mode: OutputMode = OutputMode.FULL) -> str:
     For ``LAST`` mode, if the provider declares ``extraction_retries > 0``,
     retries extraction with 10 s delays between attempts.  This handles
     TUI-based providers (e.g. Gemini CLI's Ink renderer) whose notification
-    spinners can temporarily obscure response text in the tmux capture buffer.
+    spinners can temporarily obscure response text in terminal scrollback.
 
     If the provider exposes an ``extraction_tail_lines`` attribute, the
     history capture for LAST mode uses that value instead of the default
     ``TMUX_HISTORY_LINES``. Status-check captures are unaffected (they go
-    through get_status directly). A single capture-pane call is made per
+    through get_status directly). A single terminal history read is made per
     get_output invocation.
     """
     try:
@@ -532,7 +663,7 @@ def get_output(terminal_id: str, mode: OutputMode = OutputMode.FULL) -> str:
 
 
 def delete_terminal(terminal_id: str, registry: PluginRegistry | None = None) -> bool:
-    """Delete terminal and kill its tmux window."""
+    """Delete terminal and kill its kitty window."""
     try:
         # Get metadata before deletion
         metadata = get_terminal_metadata(terminal_id)
@@ -568,20 +699,22 @@ def delete_terminal(terminal_id: str, registry: PluginRegistry | None = None) ->
             except Exception as e:
                 logger.warning(f"Failed to snapshot terminal {terminal_id}: {e}")
 
-            # Stop pipe-pane logging
+            # Stop terminal logging hook
             try:
                 tmux_client.stop_pipe_pane(metadata["tmux_session"], metadata["tmux_window"])
             except Exception as e:
-                logger.warning(f"Failed to stop pipe-pane for {terminal_id}: {e}")
+                logger.warning(f"Failed to stop terminal logging for {terminal_id}: {e}")
 
-            # Kill the tmux window (this terminates the agent process)
+            # Kill the kitty window (this terminates the agent process)
             try:
                 tmux_client.kill_window(metadata["tmux_session"], metadata["tmux_window"])
             except Exception as e:
-                logger.warning(f"Failed to kill tmux window for {terminal_id}: {e}")
+                logger.warning(f"Failed to kill kitty window for {terminal_id}: {e}")
 
         # Cleanup provider state and database record
         provider_manager.cleanup_provider(terminal_id)
+        with _terminal_status_lock:
+            _terminal_last_status.pop(terminal_id, None)
         with _memory_injected_lock:
             _memory_injected_terminals.discard(terminal_id)
         # Drop any per-curator dispatch lock so the registry doesn't grow

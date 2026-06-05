@@ -178,7 +178,7 @@ def _ensure_workspaces_parent_trusted() -> None:
 class GeminiCliProvider(BaseProvider):
     """Provider for Gemini CLI tool integration.
 
-    Manages the lifecycle of a Gemini CLI session in a tmux window,
+    Manages the lifecycle of a Gemini CLI session in a kitty window,
     including initialization, status detection, response extraction,
     and cleanup. Gemini CLI does not support inline agent profiles —
     if provided, the system prompt is passed via --prompt-interactive flag.
@@ -234,7 +234,7 @@ class GeminiCliProvider(BaseProvider):
             gemini --yolo --sandbox false [-i "system prompt"]
 
         The --yolo flag auto-approves all tool actions, which is required for
-        non-interactive operation in CAO-managed tmux sessions.
+        non-interactive operation in CAO-managed kitty sessions.
 
         System prompt injection uses the ``-i`` (``--prompt-interactive``) flag,
         which sends the system prompt as the first user message and continues in
@@ -463,7 +463,7 @@ class GeminiCliProvider(BaseProvider):
         """Initialize Gemini CLI provider by starting the gemini command.
 
         Steps:
-        1. Wait for the shell prompt in the tmux window
+        1. Wait for the shell prompt in the kitty window
         2. Build and send the gemini command (may include MCP setup)
         3. Wait for Gemini to reach IDLE state (welcome banner + input box)
 
@@ -473,12 +473,12 @@ class GeminiCliProvider(BaseProvider):
         Raises:
             TimeoutError: If shell or Gemini CLI doesn't start within timeout
         """
-        # Wait for shell prompt to appear in the tmux window
+        # Wait for shell prompt to appear in the kitty window
         if not wait_for_shell(tmux_client, self.session_name, self.window_name, timeout=10.0):
             raise TimeoutError("Shell initialization timed out after 10 seconds")
 
         # Send a warm-up command before launching Gemini.
-        # Gemini's Ink TUI exits silently in freshly-created tmux sessions where
+        # Gemini's Ink TUI exits silently in freshly-created kitty sessions where
         # the shell environment (PATH, node, nvm, homebrew) is not fully loaded.
         # wait_for_shell() returns when the prompt text stabilizes, but slow
         # shell init scripts (.zshrc, brew shellenv) may still be running.
@@ -506,7 +506,7 @@ class GeminiCliProvider(BaseProvider):
         # Build properly escaped command string
         command = self._build_gemini_command()
 
-        # Send Gemini command to the tmux window
+        # Send Gemini command to the kitty window
         tmux_client.send_keys(self.session_name, self.window_name, command)
 
         # Wait for Gemini CLI to finish initialization.
@@ -566,7 +566,7 @@ class GeminiCliProvider(BaseProvider):
         """Get Gemini CLI status by analyzing terminal output.
 
         Status detection logic:
-        1. Capture tmux pane output (full or tail)
+        1. Capture kitty window output (full or tail)
         2. Strip ANSI codes for reliable text matching
         3. Check bottom N lines for the idle prompt pattern (* + placeholder text)
         4. If idle prompt found: distinguish IDLE vs COMPLETED by checking for ✦ response
@@ -649,7 +649,7 @@ class GeminiCliProvider(BaseProvider):
     def get_idle_pattern_for_log(self) -> str:
         """Return Gemini CLI idle prompt pattern for log file monitoring.
 
-        Used by the inbox service for quick IDLE state detection in pipe-pane
+        Used by the inbox service for quick IDLE state detection in terminal
         log files before calling the full get_status() method.
         """
         return IDLE_PROMPT_PATTERN_LOG
@@ -658,7 +658,7 @@ class GeminiCliProvider(BaseProvider):
     def extraction_retries(self) -> int:
         """Gemini CLI's Ink TUI may show notification spinners for ~10-15s
         after completing a response, temporarily obscuring the response text
-        in the tmux capture buffer.  Retry extraction to wait for spinners
+        in the terminal scrollback.  Retry extraction to wait for spinners
         to clear."""
         return 3
 

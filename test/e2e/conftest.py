@@ -3,7 +3,7 @@
 E2E tests require:
 - A running CAO server (cao-server / uvicorn on localhost:9889)
 - The provider CLI tool installed and authenticated (codex, claude, kiro-cli, gemini, copilot)
-- Zellij available on the system
+- kitty available on the system
 
 Run with: uv run pytest -m e2e test/e2e/ -v
 """
@@ -56,10 +56,10 @@ def warmup_mcp_server_cache():
 
 
 @pytest.fixture(scope="session", autouse=True)
-def require_zellij():
-    """Skip all E2E tests if Zellij is not installed."""
-    if not shutil.which("zellij"):
-        pytest.skip("Zellij not installed")
+def require_kitty():
+    """Skip all E2E tests if kitty is not installed."""
+    if not shutil.which("kitty"):
+        pytest.skip("kitty not installed")
 
 
 def _cli_available(command: str) -> bool:

@@ -73,3 +73,15 @@ class PostKillTerminalEvent(CaoEvent):
     event_type: str = "post_kill_terminal"
     terminal_id: str = ""
     agent_name: str | None = None
+
+
+@dataclass
+class PostTerminalInterruptedEvent(CaoEvent):
+    """Emitted after a running terminal disappears unexpectedly."""
+
+    event_type: str = "post_terminal_interrupted"
+    terminal_id: str = ""
+    agent_name: str | None = None
+    provider: str = ""
+    reason: str = ""
+    previous_status: str = ""
