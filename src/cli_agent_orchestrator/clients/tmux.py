@@ -80,6 +80,10 @@ class KittyClient:
         self.socket_dir = Path(base_socket_dir) if base_socket_dir else CAO_HOME_DIR / "kitty"
         self.socket_name = socket_name
         self._log_pipes: dict[tuple[str, str], tuple[threading.Event, threading.Thread]] = {}
+        # Memoized result of _control_address(). KITTY_LISTEN_ON is fixed for
+        # the process lifetime and an ambient kitty outlives the CAO process
+        # started from it, so resolving once is safe.
+        self._resolved_control_address: str | None = None
 
     def _command(self, *args: str) -> list[str]:
         """Build a generic kitten command for compatibility with older callers."""
@@ -94,14 +98,45 @@ class KittyClient:
         return self.socket_dir / self.APP_SOCKET_NAME
 
     def _socket_address(self) -> str:
+        """Address of CAO's own dedicated control socket."""
         return f"unix:{self.socket_path()}"
+
+    def _address_answers(self, address: str) -> bool:
+        """True if a kitty instance answers remote control at ``address``."""
+        result = subprocess.run(
+            [self.kitten_command, "@", "--to", address, "ls"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.returncode == 0
+
+    def _control_address(self) -> str:
+        """Remote-control address CAO sends commands to.
+
+        Prefer a kitty inherited from the surrounding window
+        (``KITTY_LISTEN_ON``): when CAO runs inside kitty, reusing that socket
+        makes new sessions open as tabs in the existing window instead of a
+        separate detached instance. Falls back to CAO's own dedicated socket
+        when there is no usable ambient kitty. Note that the spawn path keeps
+        using ``_socket_address()`` (the own socket) regardless, so the
+        fallback instance is always self-managed.
+        """
+        if self._resolved_control_address is None:
+            ambient = os.environ.get("KITTY_LISTEN_ON")
+            if ambient and self._address_answers(ambient):
+                logger.info("Reusing ambient kitty instance at %s", ambient)
+                self._resolved_control_address = ambient
+            else:
+                self._resolved_control_address = self._socket_address()
+        return self._resolved_control_address
 
     def _remote_command(self, *args: str) -> list[str]:
         return [
             self.kitten_command,
             "@",
             "--to",
-            self._socket_address(),
+            self._control_address(),
             *args,
         ]
 
@@ -129,11 +164,12 @@ class KittyClient:
         )
 
     def _app_running(self) -> bool:
-        """Return True if the shared CAO kitty instance answers remote control."""
-        if not self.socket_path().exists():
-            return False
-        result = self._run(["ls"], session_name="app", check=False)
-        return result.returncode == 0
+        """Return True if the kitty instance CAO controls answers remote control.
+
+        This is the ambient kitty (KITTY_LISTEN_ON) when reusing the
+        surrounding window, otherwise CAO's own dedicated instance.
+        """
+        return self._address_answers(self._control_address())
 
     def _wait_for_app_ready(self, timeout: float = 5.0) -> None:
         """Wait until the shared kitty instance's control socket answers."""
