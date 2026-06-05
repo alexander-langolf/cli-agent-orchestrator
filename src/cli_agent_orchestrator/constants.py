@@ -124,6 +124,18 @@ API_BASE_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
 # Default timeout (seconds) for HTTP calls to the CAO API server.
 MCP_REQUEST_TIMEOUT = 30
 
+# Timeout (seconds) for terminal-creation API calls (assign), which block
+# synchronously on provider initialization. Codex/CLI warm-up routinely takes
+# 60-120s, so this must exceed CODEX_INIT_TIMEOUT (below) or assign reports a
+# spurious failure while the worker keeps spawning server-side (zombie worker).
+MCP_TERMINAL_CREATE_TIMEOUT = int(os.environ.get("CAO_MCP_TERMINAL_CREATE_TIMEOUT", "180"))
+
+# Timeout (seconds) the Codex provider waits for the CLI to reach an idle/ready
+# state during initialize(). The git+uvx MCP server fetch and TUI warm-up can
+# be slow on a cold cache; keep this below MCP_TERMINAL_CREATE_TIMEOUT so the
+# server fails cleanly before the assign client gives up.
+CODEX_INIT_TIMEOUT = float(os.environ.get("CAO_CODEX_INIT_TIMEOUT", "120"))
+
 
 # Operators can extend network allowlists via the env vars handled below.
 # Same comma-separated pattern as ``CAO_PROFILE_ALLOWED_HOSTS`` in install_service.

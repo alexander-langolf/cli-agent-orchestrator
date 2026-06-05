@@ -7,6 +7,7 @@ import time
 from typing import Optional
 
 from cli_agent_orchestrator.clients.tmux import tmux_client
+from cli_agent_orchestrator.constants import CODEX_INIT_TIMEOUT
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.providers.base import BaseProvider
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
@@ -297,10 +298,12 @@ class CodexProvider(BaseProvider):
         if not wait_until_status(
             self,
             {TerminalStatus.IDLE, TerminalStatus.COMPLETED},
-            timeout=60.0,
+            timeout=CODEX_INIT_TIMEOUT,
             polling_interval=1.0,
         ):
-            raise TimeoutError("Codex initialization timed out after 60 seconds")
+            raise TimeoutError(
+                f"Codex initialization timed out after {CODEX_INIT_TIMEOUT:g} seconds"
+            )
 
         self._initialized = True
         return True

@@ -10,7 +10,12 @@ import requests
 from fastmcp import FastMCP
 from pydantic import Field
 
-from cli_agent_orchestrator.constants import API_BASE_URL, DEFAULT_PROVIDER, MCP_REQUEST_TIMEOUT
+from cli_agent_orchestrator.constants import (
+    API_BASE_URL,
+    DEFAULT_PROVIDER,
+    MCP_REQUEST_TIMEOUT,
+    MCP_TERMINAL_CREATE_TIMEOUT,
+)
 from cli_agent_orchestrator.mcp_server.models import HandoffResult
 from cli_agent_orchestrator.models.inbox import OrchestrationType
 from cli_agent_orchestrator.models.terminal import TerminalStatus
@@ -203,7 +208,7 @@ def _create_terminal(
         response = requests.post(
             f"{API_BASE_URL}/sessions/{session_name}/terminals",
             params=params,
-            timeout=MCP_REQUEST_TIMEOUT,
+            timeout=MCP_TERMINAL_CREATE_TIMEOUT,
         )
         response.raise_for_status()
         terminal = response.json()
@@ -220,7 +225,7 @@ def _create_terminal(
             params["working_directory"] = working_directory
 
         response = requests.post(
-            f"{API_BASE_URL}/sessions", params=params, timeout=MCP_REQUEST_TIMEOUT
+            f"{API_BASE_URL}/sessions", params=params, timeout=MCP_TERMINAL_CREATE_TIMEOUT
         )
         response.raise_for_status()
         terminal = response.json()
