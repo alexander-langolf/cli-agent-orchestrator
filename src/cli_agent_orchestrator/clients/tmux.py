@@ -57,6 +57,14 @@ class KittyClient:
     )
     _MAX_ENV_VALUE_BYTES = 2048
 
+    # All CAO sessions live as tabs inside ONE shared kitty instance, so there
+    # is a single app-level control socket rather than one socket per session.
+    APP_SOCKET_NAME = "cao.sock"
+    # tall layout makes the first window of a tab the large left pane; the
+    # supervisor is always a session's first window, so it stays bigger than
+    # the worker splits stacked in the right column. The bias nudges it larger.
+    SUPERVISOR_LAYOUT = "tall:bias=65"
+
     def __init__(
         self,
         command: str | None = None,
@@ -81,19 +89,19 @@ class KittyClient:
         validated_session = validate_tmux_name(session_name, "session_name")
         return self.socket_dir / f"{validated_session}.kitty-session"
 
-    def socket_path(self, session_name: str) -> Path:
-        validated_session = validate_tmux_name(session_name, "session_name")
-        return self.socket_dir / f"{validated_session}.sock"
+    def socket_path(self) -> Path:
+        """Path to the single shared CAO kitty control socket."""
+        return self.socket_dir / self.APP_SOCKET_NAME
 
-    def _socket_address(self, session_name: str) -> str:
-        return f"unix:{self.socket_path(session_name)}"
+    def _socket_address(self) -> str:
+        return f"unix:{self.socket_path()}"
 
-    def _remote_command(self, session_name: str, *args: str) -> list[str]:
+    def _remote_command(self, *args: str) -> list[str]:
         return [
             self.kitten_command,
             "@",
             "--to",
-            self._socket_address(session_name),
+            self._socket_address(),
             *args,
         ]
 
@@ -107,7 +115,10 @@ class KittyClient:
         text: bool = True,
         input: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        command = self._remote_command(session_name, *args) if session_name else args
+        # ``session_name`` no longer selects a socket (there is one shared app
+        # socket); a non-None value simply marks this as a remote-control call.
+        # It is kept in the signature so existing call sites stay unchanged.
+        command = self._remote_command(*args) if session_name is not None else args
         logger.debug("Running kitty command: %s", shlex.join(command))
         return subprocess.run(
             command,
@@ -117,8 +128,24 @@ class KittyClient:
             input=input,
         )
 
+    def _app_running(self) -> bool:
+        """Return True if the shared CAO kitty instance answers remote control."""
+        if not self.socket_path().exists():
+            return False
+        result = self._run(["ls"], session_name="app", check=False)
+        return result.returncode == 0
+
+    def _wait_for_app_ready(self, timeout: float = 5.0) -> None:
+        """Wait until the shared kitty instance's control socket answers."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._app_running():
+                return
+            time.sleep(0.1)
+        raise TimeoutError("Kitty app instance did not become ready")
+
     def _wait_for_session_ready(self, session_name: str, timeout: float = 5.0) -> None:
-        """Wait until the kitty remote-control socket answers."""
+        """Wait until the session's tab/window exists in the shared instance."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self.session_exists(session_name):
@@ -127,28 +154,37 @@ class KittyClient:
         raise TimeoutError(f"Kitty session '{session_name}' did not become ready")
 
     def attach_command(self, session_name: str, window_name: str) -> list[str]:
-        """Build a command that focuses a kitty window in a CAO session."""
-        validated_window = validate_tmux_name(window_name, "window_name")
+        """Build a command that focuses a CAO window (split) within its tab."""
         return self._remote_command(
-            session_name,
             "focus-window",
             "--match",
-            self._window_match(validated_window),
+            self._window_match(session_name, window_name),
         )
 
     def attach_session_command(self, session_name: str) -> list[str]:
-        """Build a command that focuses the first kitty window in a CAO session."""
-        validated_session = validate_tmux_name(session_name, "session_name")
+        """Build a command that focuses a CAO session's tab."""
         return self._remote_command(
-            validated_session,
-            "focus-window",
+            "focus-tab",
             "--match",
-            f"env:CAO_SESSION_NAME={validated_session}",
+            self._session_match(session_name),
         )
 
-    def _window_match(self, window_name: str) -> str:
+    def _session_match(self, session_name: str) -> str:
+        validated_session = validate_tmux_name(session_name, "session_name")
+        return f"env:CAO_SESSION_NAME={validated_session}"
+
+    def _window_match(self, session_name: str, window_name: str) -> str:
+        """Match one window uniquely across all session tabs.
+
+        Window names are only unique within a session and every session now
+        shares one kitty instance, so the match must be qualified by session.
+        """
+        validated_session = validate_tmux_name(session_name, "session_name")
         validated_window = validate_tmux_name(window_name, "window_name")
-        return f"env:CAO_WINDOW_NAME={validated_window}"
+        return (
+            f"env:CAO_SESSION_NAME={validated_session} "
+            f"and env:CAO_WINDOW_NAME={validated_window}"
+        )
 
     def _resolve_and_validate_working_directory(self, working_directory: Optional[str]) -> str:
         """Resolve and validate working directory."""
@@ -245,27 +281,31 @@ class KittyClient:
     ) -> Path:
         self.socket_dir.mkdir(parents=True, exist_ok=True)
         session_file = self.session_file_path(session_name)
-        launch_args = ["launch", "--title", window_name]
+        # ``environment`` already carries CAO_SESSION_NAME/CAO_WINDOW_NAME/
+        # CAO_TERMINAL_ID (set by the caller), so they are emitted by the loop
+        # below — no need to add them again.
+        launch_args = [
+            "launch",
+            "--title",
+            window_name,
+            "--var",
+            f"cao_session={session_name}",
+            "--var",
+            f"cao_window={window_name}",
+        ]
         for key, value in environment.items():
             launch_args.extend(["--env", f"{key}={value}"])
-        launch_args.extend(
-            [
-                "--env",
-                f"CAO_SESSION_NAME={session_name}",
-                "--env",
-                f"CAO_WINDOW_NAME={window_name}",
-                "--var",
-                f"cao_session={session_name}",
-                "--var",
-                f"cao_window={window_name}",
-            ]
-        )
+        # ``new_tab`` as the first directive becomes the instance's first tab
+        # (no stray default tab). Each CAO session is one such tab; the initial
+        # window launched here is the supervisor, which tall keeps as the large
+        # left pane.
         session_text = "\n".join(
             [
-                f"os_window_title {session_name}",
+                "os_window_title CAO",
                 "os_window_size 220c 50c",
                 "enabled_layouts tall,stack,splits",
-                "layout tall",
+                f"new_tab {session_name}",
+                f"layout {self.SUPERVISOR_LAYOUT}",
                 self._session_line(["cd", working_directory]),
                 self._session_line(launch_args),
                 "",
@@ -282,38 +322,92 @@ class KittyClient:
         working_directory: Optional[str] = None,
         extra_env: Optional[Dict[str, str]] = None,
     ) -> str:
-        """Create a kitty session with an initial CAO window and return the window name."""
+        """Create a CAO session as a tab in the shared kitty instance.
+
+        The first session ever created boots the shared instance (its tab is
+        defined by a bootstrap session file). Every later session is added as a
+        new tab via remote control. Returns the window name.
+        """
         working_directory = self._resolve_and_validate_working_directory(working_directory)
         validated_session = validate_tmux_name(session_name, "session_name")
         validated_window = validate_tmux_name(window_name, "window_name")
         environment = self._base_environment(terminal_id, extra_env)
-        session_file = self._write_session_file(
-            validated_session,
-            validated_window,
-            terminal_id,
-            working_directory,
-            environment,
-        )
-        command = [
-            self.kitty_command,
-            "--detach",
-            "--listen-on",
-            self._socket_address(validated_session),
-            "-o",
-            "allow_remote_control=socket-only",
-            "--session",
-            str(session_file),
-        ]
-        logger.debug("Starting kitty session: %s", shlex.join(command))
-        subprocess.Popen(command)
+        environment["CAO_SESSION_NAME"] = validated_session
+        environment["CAO_WINDOW_NAME"] = validated_window
+
+        if not self._app_running():
+            # The instance is not answering. If a socket file is still on disk
+            # it is stale (e.g. left by a crash/kill -9); remove it so the fresh
+            # kitty can bind cleanly instead of every future launch hanging in
+            # _wait_for_app_ready on a dead socket.
+            try:
+                self.socket_path().unlink()
+            except FileNotFoundError:
+                pass
+            session_file = self._write_session_file(
+                validated_session,
+                validated_window,
+                terminal_id,
+                working_directory,
+                environment,
+            )
+            command = [
+                self.kitty_command,
+                "--detach",
+                "--listen-on",
+                self._socket_address(),
+                "-o",
+                "allow_remote_control=socket-only",
+                "--session",
+                str(session_file),
+            ]
+            logger.debug("Starting shared kitty instance: %s", shlex.join(command))
+            subprocess.Popen(command)
+            self._wait_for_app_ready()
+        else:
+            self._launch_session_tab(
+                validated_session, validated_window, working_directory, environment
+            )
         self._wait_for_session_ready(validated_session)
         logger.info(
-            "Created kitty session: %s with window: %s in directory: %s",
+            "Created kitty session tab: %s with window: %s in directory: %s",
             validated_session,
             validated_window,
             working_directory,
         )
         return validated_window
+
+    def _launch_session_tab(
+        self,
+        session_name: str,
+        window_name: str,
+        working_directory: str,
+        environment: Dict[str, str],
+    ) -> None:
+        """Add a new session tab to the already-running shared kitty instance."""
+        args = [
+            "launch",
+            "--type=tab",
+            "--tab-title",
+            session_name,
+            "--title",
+            window_name,
+            "--cwd",
+            working_directory,
+            "--var",
+            f"cao_session={session_name}",
+            "--var",
+            f"cao_window={window_name}",
+        ]
+        for key, value in environment.items():
+            args.extend(["--env", f"{key}={value}"])
+        self._run(args, session_name=session_name)
+        # Apply the supervisor-favouring layout to the freshly created tab.
+        self._run(
+            ["goto-layout", "--match", self._session_match(session_name), self.SUPERVISOR_LAYOUT],
+            session_name=session_name,
+            check=False,
+        )
 
     def create_window(
         self,
@@ -338,15 +432,20 @@ class KittyClient:
         window_env["CAO_WINDOW_NAME"] = validated_window
         window_env["CAO_TERMINAL_ID"] = terminal_id
 
+        # --match directs the new split into the target session's tab even when
+        # another tab is active (verified). The supervisor was created first and
+        # stays the large pane under tall; this worker joins the right-hand stack.
         args = [
             "launch",
             "--type=window",
+            "--match",
+            self._session_match(validated_session),
             "--title",
             validated_window,
             "--cwd",
             working_directory,
-            "--add-to-session",
-            ".",
+            "--var",
+            f"cao_window={validated_window}",
         ]
         for key, value in window_env.items():
             args.extend(["--env", f"{key}={value}"])
@@ -372,7 +471,7 @@ class KittyClient:
     ) -> None:
         """Send text to a kitty window, then send Enter key presses."""
         validated_session = validate_tmux_name(session_name, "session_name")
-        match = self._window_match(window_name)
+        match = self._window_match(session_name, window_name)
         bracketed = "enable" if force_bracketed_paste else "disable"
         self._run(
             [
@@ -409,7 +508,12 @@ class KittyClient:
         """Send a special key sequence to a kitty window."""
         validated_session = validate_tmux_name(session_name, "session_name")
         self._run(
-            ["send-key", "--match", self._window_match(window_name), self._normalize_key(key)],
+            [
+                "send-key",
+                "--match",
+                self._window_match(session_name, window_name),
+                self._normalize_key(key),
+            ],
             session_name=validated_session,
         )
         logger.debug("Sent special key to %s/%s", validated_session, window_name)
@@ -421,7 +525,7 @@ class KittyClient:
             [
                 "send-text",
                 "--match",
-                self._window_match(window_name),
+                self._window_match(session_name, window_name),
                 "--stdin",
                 "--bracketed-paste",
                 "disable",
@@ -444,7 +548,7 @@ class KittyClient:
         args = [
             "get-text",
             "--match",
-            self._window_match(window_name),
+            self._window_match(validated_session, window_name),
             "--extent",
             "all",
         ]
@@ -458,20 +562,20 @@ class KittyClient:
         return "\n".join(output.splitlines()[-lines:])
 
     def list_sessions(self) -> List[Dict[str, str]]:
-        """List active CAO kitty sessions discovered from socket files."""
-        if not self.socket_dir.exists():
+        """List active CAO sessions (one per tab) in the shared kitty instance."""
+        if not self._app_running():
             return []
-        sessions: List[Dict[str, str]] = []
-        for socket_path in sorted(self.socket_dir.glob("*.sock")):
-            session_name = socket_path.stem
-            try:
-                result = self._run(["ls"], session_name=session_name, check=False)
-            except Exception as e:
-                logger.debug("Failed to query kitty session %s: %s", session_name, e)
-                continue
-            if result.returncode == 0:
-                sessions.append({"id": session_name, "name": session_name, "status": "active"})
-        return sessions
+        try:
+            tree = self._list_window_tree("app")
+        except Exception as e:
+            logger.debug("Failed to query shared kitty instance: %s", e)
+            return []
+        sessions: Dict[str, Dict[str, str]] = {}
+        for window in self._iter_windows(tree):
+            name = window.get("env", {}).get("CAO_SESSION_NAME")
+            if name and name not in sessions:
+                sessions[name] = {"id": name, "name": name, "status": "active"}
+        return sorted(sessions.values(), key=lambda s: s["name"])
 
     @staticmethod
     def _iter_windows(tree: object):
@@ -496,16 +600,21 @@ class KittyClient:
             return []
 
     def _find_window(self, session_name: str, window_name: str) -> Optional[dict]:
+        validated_session = validate_tmux_name(session_name, "session_name")
         validated_window = validate_tmux_name(window_name, "window_name")
-        tree = self._list_window_tree(session_name)
+        tree = self._list_window_tree(validated_session)
         for window in self._iter_windows(tree):
             env = window.get("env", {})
+            # All sessions share one instance, so qualify by session before
+            # matching the window name/title to avoid cross-tab collisions.
+            if env.get("CAO_SESSION_NAME") != validated_session:
+                continue
             if env.get("CAO_WINDOW_NAME") == validated_window or window.get("title") == validated_window:
                 return window
         return None
 
     def get_session_windows(self, session_name: str) -> List[Dict[str, str]]:
-        """Get all CAO windows in a kitty session."""
+        """Get all CAO windows belonging to a session's tab."""
         validated_session = validate_tmux_name(session_name, "session_name")
         try:
             tree = self._list_window_tree(validated_session)
@@ -514,44 +623,60 @@ class KittyClient:
             return []
 
         windows: List[Dict[str, str]] = []
-        for index, window in enumerate(self._iter_windows(tree)):
+        for window in self._iter_windows(tree):
             env = window.get("env", {})
+            if env.get("CAO_SESSION_NAME") != validated_session:
+                continue
             name = env.get("CAO_WINDOW_NAME") or window.get("title")
             if name:
-                windows.append({"name": str(name), "index": str(index)})
+                windows.append({"name": str(name), "index": str(len(windows))})
         return windows
 
     def kill_session(self, session_name: str) -> bool:
-        """Close all kitty windows in a CAO session."""
+        """Close a CAO session's tab (all its windows) in the shared instance."""
         validated_session = validate_tmux_name(session_name, "session_name")
+        if not self._app_running():
+            # Nothing to close; drop any stale bootstrap session file.
+            self._cleanup_session_file(validated_session)
+            return False
         result = self._run(
             [
                 "close-window",
                 "--match",
-                f"env:CAO_SESSION_NAME={validated_session}",
+                self._session_match(validated_session),
                 "--ignore-no-match",
             ],
             session_name=validated_session,
             check=False,
         )
-        for path in (self.socket_path(validated_session), self.session_file_path(validated_session)):
+        self._cleanup_session_file(validated_session)
+        # When the last session's tab closes, the shared instance exits on its
+        # own (no windows left); remove the now-dead socket file so the next
+        # launch boots a fresh instance.
+        if not self._app_running():
             try:
-                path.unlink()
+                self.socket_path().unlink()
             except FileNotFoundError:
                 pass
         if result.returncode == 0:
-            logger.info("Killed kitty session: %s", validated_session)
+            logger.info("Killed kitty session tab: %s", validated_session)
             return True
         return False
 
+    def _cleanup_session_file(self, session_name: str) -> None:
+        try:
+            self.session_file_path(session_name).unlink()
+        except FileNotFoundError:
+            pass
+
     def kill_window(self, session_name: str, window_name: str) -> bool:
-        """Close a specific kitty window within a session."""
+        """Close a specific CAO window (split) within a session's tab."""
         validated_session = validate_tmux_name(session_name, "session_name")
         result = self._run(
             [
                 "close-window",
                 "--match",
-                self._window_match(window_name),
+                self._window_match(validated_session, window_name),
                 "--ignore-no-match",
             ],
             session_name=validated_session,
@@ -563,10 +688,18 @@ class KittyClient:
         return False
 
     def session_exists(self, session_name: str) -> bool:
-        """Check whether the kitty remote-control socket responds."""
+        """Check whether the session's tab exists in the shared instance."""
         validated_session = validate_tmux_name(session_name, "session_name")
-        result = self._run(["ls"], session_name=validated_session, check=False)
-        return result.returncode == 0
+        if not self._app_running():
+            return False
+        try:
+            tree = self._list_window_tree(validated_session)
+        except Exception:
+            return False
+        for window in self._iter_windows(tree):
+            if window.get("env", {}).get("CAO_SESSION_NAME") == validated_session:
+                return True
+        return False
 
     def get_pane_working_directory(self, session_name: str, window_name: str) -> Optional[str]:
         """Get the current working directory for a kitty window."""

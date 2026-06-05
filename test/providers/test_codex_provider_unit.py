@@ -10,6 +10,13 @@ from cli_agent_orchestrator.providers.codex import CodexProvider, ProviderError
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
+# Default command CAO sends when no profile model is set: invoked via
+# `command codex` (alias-proof) with the explicit default model + reasoning.
+BASE_CODEX_CMD = (
+    "command codex --yolo --no-alt-screen --disable shell_snapshot "
+    "--model gpt-5.5 -c 'model_reasoning_effort=\"medium\"'"
+)
+
 
 def load_fixture(filename: str) -> str:
     with open(FIXTURES_DIR / filename, "r") as f:
@@ -36,7 +43,7 @@ class TestCodexProviderInitialization:
         mock_tmux.send_keys.assert_any_call(
             "test-session",
             "window-0",
-            "codex --yolo --no-alt-screen --disable shell_snapshot",
+            BASE_CODEX_CMD,
         )
         mock_wait_status.assert_called_once()
 
@@ -68,7 +75,7 @@ class TestCodexBuildCommand:
     def test_build_command_no_profile(self):
         provider = CodexProvider("test1234", "test-session", "window-0", None)
         command = provider._build_codex_command()
-        assert command == "codex --yolo --no-alt-screen --disable shell_snapshot"
+        assert command == BASE_CODEX_CMD
 
     @patch("cli_agent_orchestrator.providers.codex.load_agent_profile")
     def test_build_command_with_skill_prompt(self, mock_load_profile):
@@ -106,7 +113,7 @@ class TestCodexBuildCommand:
         command = provider._build_codex_command()
 
         mock_load_profile.assert_called_once_with("code_supervisor")
-        assert "codex --yolo --no-alt-screen --disable shell_snapshot" in command
+        assert "command codex --yolo --no-alt-screen --disable shell_snapshot" in command
         assert "-c" in command
         assert "developer_instructions=" in command
         assert "You are a code supervisor agent." in command
@@ -230,7 +237,7 @@ class TestCodexBuildCommand:
         provider = CodexProvider("test1234", "test-session", "window-0", "empty_agent")
         command = provider._build_codex_command()
 
-        assert command == "codex --yolo --no-alt-screen --disable shell_snapshot"
+        assert command == BASE_CODEX_CMD
         assert "developer_instructions" not in command
 
     @patch("cli_agent_orchestrator.providers.codex.load_agent_profile")
@@ -245,7 +252,7 @@ class TestCodexBuildCommand:
         provider = CodexProvider("test1234", "test-session", "window-0", "none_agent")
         command = provider._build_codex_command()
 
-        assert command == "codex --yolo --no-alt-screen --disable shell_snapshot"
+        assert command == BASE_CODEX_CMD
 
     @patch("cli_agent_orchestrator.providers.codex.load_agent_profile")
     def test_build_command_profile_load_failure(self, mock_load_profile):
@@ -301,7 +308,7 @@ class TestCodexProviderModelFlag:
         assert "--model gpt-5" in command
 
     @patch("cli_agent_orchestrator.providers.codex.load_agent_profile")
-    def test_build_command_omits_model_when_unset(self, mock_load):
+    def test_build_command_uses_default_model_when_unset(self, mock_load):
         mock_profile = MagicMock()
         mock_profile.model = None
         mock_profile.system_prompt = None
@@ -312,7 +319,10 @@ class TestCodexProviderModelFlag:
         provider = CodexProvider("tid", "sess", "win", "agent")
         command = provider._build_codex_command()
 
-        assert "--model" not in command
+        # No explicit model → CAO's portable default is injected so behavior
+        # does not silently depend on the user's ~/.codex/config.toml.
+        assert "--model gpt-5.5" in command
+        assert 'model_reasoning_effort="medium"' in command
 
 
 class TestCodexBuildCommandExtra:

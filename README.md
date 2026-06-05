@@ -6,6 +6,15 @@
 
 **CLI Agent Orchestrator (CAO)** is an open-source multi-agent orchestration framework for AI coding CLIs — Claude Code, Kiro CLI, Codex CLI, Gemini CLI, Kimi CLI, GitHub Copilot CLI, OpenCode, and Amazon Q Developer CLI. CAO runs each agent in an isolated kitty session and coordinates them with a supervisor–worker pattern over the Model Context Protocol (MCP), so one supervisor agent can delegate tasks to multiple specialist agents in parallel, sequentially, or as a swarm.
 
+> ### Fork enhancements
+>
+> This fork adds workflow and provider improvements on top of upstream CAO:
+>
+> - **Single-window tabbed sessions** — every CAO session opens as a **tab in one shared kitty app** instead of spawning a separate OS window. Agents within a session are **split panes** in that tab, and the **supervisor pane is sized larger** than the workers (`tall:bias=65`). Windows are addressed by a stateless `CAO_SESSION_NAME + CAO_WINDOW_NAME` match, so it survives `cao-server` restarts. (Tradeoff: one window = shared fate across sessions.)
+> - **Alias-proof Codex launch** — Codex is started via `command codex …`, so a user alias like `alias codex='codex --yolo'` can no longer double `--dangerously-bypass-approvals-and-sandbox` and abort startup.
+> - **Flexible Codex model with a portable default** — any profile can pin `model`; when unset, CAO falls back to an explicit default (`gpt-5.5` at `medium` reasoning) instead of depending on the user's personal `~/.codex/config.toml`. A profile that names a `codexProfile` still defers to that config block.
+> - **Supervisor can run shell tools** — the built-in `supervisor` role now includes `execute_bash`, so a supervisor can call `gh` and other CLI tools directly.
+
 ## What is CAO?
 
 CAO (pronounced "kay-oh") is a lightweight local orchestrator that sits between you and the CLI coding agents you already use. Instead of running a single agent at a time, CAO lets a supervisor agent launch, message, and coordinate multiple worker agents — each one a real CLI tool (Claude Code, Kiro, Codex, etc.) running in its own kitty terminal. Agents communicate through three MCP-exposed primitives (**handoff**, **assign**, **send_message**) and are managed via a CLI, a bundled Web UI, or an MCP management server. Because every agent is a full CLI process, CAO preserves tool behaviour, auth, and advanced features (Claude Code sub-agents, Q CLI custom agents, etc.) that a raw API wrapper cannot.

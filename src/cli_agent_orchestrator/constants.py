@@ -232,10 +232,21 @@ MEMORY_SCOPE_BUDGET_CHARS = 1000
 # Users can define custom roles in settings.json under "roles".
 # CAO vocabulary: execute_bash, fs_read, fs_write, fs_list, fs_*, @builtin, @cao-mcp-server
 ROLE_TOOL_DEFAULTS = {
-    "supervisor": ["@cao-mcp-server", "fs_read", "fs_list"],
+    # execute_bash lets the supervisor run shell tools (e.g. gh) for PR/issue
+    # orchestration. For codex this is soft-enforced via the system prompt.
+    "supervisor": ["@cao-mcp-server", "fs_read", "fs_list", "execute_bash"],
     "reviewer": ["@builtin", "fs_read", "fs_list", "@cao-mcp-server"],
     "developer": ["@builtin", "fs_*", "execute_bash", "@cao-mcp-server"],
 }
+
+# Default Codex model + reasoning effort used when a profile does not set
+# `model` and does not defer to a named [profiles.<name>] codex config block.
+# Kept explicit so CAO's default does not depend on the user's personal
+# ~/.codex/config.toml. Equivalent to `codex -m gpt-5.5` at medium reasoning.
+# NB: the combined slug "gpt-5.5-medium" is NOT a valid model id — the model
+# name and reasoning effort are separate knobs in Codex.
+DEFAULT_CODEX_MODEL = "gpt-5.5"
+DEFAULT_CODEX_REASONING_EFFORT = "medium"
 
 # Security constraints prepended to system prompts for providers without
 # native tool restriction mechanisms (kimi_cli, codex).

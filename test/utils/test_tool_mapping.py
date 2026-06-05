@@ -20,7 +20,7 @@ class TestResolveAllowedTools:
     def test_role_defaults_when_no_profile_tools(self):
         """Role-based defaults used when profile has no allowedTools."""
         result = resolve_allowed_tools(None, "supervisor")
-        assert result == ["@cao-mcp-server", "fs_read", "fs_list"]
+        assert result == ["@cao-mcp-server", "fs_read", "fs_list", "execute_bash"]
 
     def test_reviewer_role_defaults(self):
         result = resolve_allowed_tools(None, "reviewer")

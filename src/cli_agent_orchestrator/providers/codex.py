@@ -149,16 +149,36 @@ class CodexProvider(BaseProvider):
             except Exception as e:
                 raise ProviderError(f"Failed to load agent profile '{self._agent_profile}': {e}")
 
-        if profile and profile.codexProfile and not yolo:
-            command_parts = ["codex", "--profile", profile.codexProfile]
+        using_codex_profile = bool(profile and profile.codexProfile and not yolo)
+
+        # Invoke via `command codex` (not bare `codex`) so a user shell alias
+        # such as `alias codex='codex --yolo'` cannot expand and pass
+        # --dangerously-bypass-approvals-and-sandbox twice, which makes Codex
+        # abort with "cannot be used multiple times". `command` bypasses
+        # aliases and functions, running the real binary from PATH.
+        if using_codex_profile:
+            command_parts = ["command", "codex", "--profile", profile.codexProfile]
         else:
-            command_parts = ["codex", "--yolo"]
+            command_parts = ["command", "codex", "--yolo"]
         command_parts.extend(["--no-alt-screen", "--disable", "shell_snapshot"])
 
-        if profile is not None:
-            if profile.model:
-                command_parts.extend(["--model", profile.model])
+        # Model selection. Profiles stay free to pick any model via `model`.
+        # When none is set, fall back to CAO's explicit default — unless a named
+        # codexProfile is active, in which case that profile's own model wins.
+        if profile and profile.model:
+            command_parts.extend(["--model", profile.model])
+        elif not using_codex_profile:
+            from cli_agent_orchestrator.constants import (
+                DEFAULT_CODEX_MODEL,
+                DEFAULT_CODEX_REASONING_EFFORT,
+            )
 
+            command_parts.extend(["--model", DEFAULT_CODEX_MODEL])
+            command_parts.extend(
+                ["-c", f'model_reasoning_effort="{DEFAULT_CODEX_REASONING_EFFORT}"']
+            )
+
+        if profile is not None:
             system_prompt = profile.system_prompt if profile.system_prompt is not None else ""
             system_prompt = self._apply_skill_prompt(system_prompt)
 

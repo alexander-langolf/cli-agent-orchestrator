@@ -1,4 +1,10 @@
-"""Tests for the kitty session runtime client."""
+"""Tests for the kitty session runtime client.
+
+CAO runs every session as a TAB inside one shared kitty instance reached
+through a single app-level control socket (``cao.sock``). Agents are split
+windows within their session's tab, addressed by a compound match that
+qualifies the window name with its session.
+"""
 
 import json
 import os
@@ -14,6 +20,10 @@ def completed(stdout: str = "") -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(args=["kitten"], returncode=0, stdout=stdout, stderr="")
 
 
+def failed() -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=["kitten"], returncode=1, stdout="", stderr="missing")
+
+
 @pytest.fixture
 def client(tmp_path) -> KittyClient:
     return KittyClient(
@@ -21,6 +31,17 @@ def client(tmp_path) -> KittyClient:
         kitten_command="kitten",
         socket_dir=tmp_path / "sockets",
     )
+
+
+@pytest.fixture
+def app_socket(client) -> str:
+    """The single shared control socket address used for every command."""
+    return f"unix:{client.socket_dir}/cao.sock"
+
+
+def tree_with(*windows) -> str:
+    """Build a kitty `ls` JSON tree containing the given window dicts."""
+    return json.dumps([{"tabs": [{"windows": list(windows)}]}])
 
 
 class TestResolveAndValidateWorkingDirectory:
@@ -42,101 +63,155 @@ class TestResolveAndValidateWorkingDirectory:
             client._resolve_and_validate_working_directory("/nonexistent/dir/xyz")
 
 
-class TestCreateSession:
-    def test_attach_command_focuses_kitty_window(self, client):
+class TestMatchExpressions:
+    def test_window_match_is_qualified_by_session(self, client):
+        assert (
+            client._window_match("ses", "win")
+            == "env:CAO_SESSION_NAME=ses and env:CAO_WINDOW_NAME=win"
+        )
+
+    def test_session_match(self, client):
+        assert client._session_match("ses") == "env:CAO_SESSION_NAME=ses"
+
+    def test_attach_command_focuses_window_via_compound_match(self, client, app_socket):
         assert client.attach_command("ses", "win") == [
             "kitten",
             "@",
             "--to",
-            f"unix:{client.socket_dir}/ses.sock",
+            app_socket,
             "focus-window",
             "--match",
-            "env:CAO_WINDOW_NAME=win",
+            "env:CAO_SESSION_NAME=ses and env:CAO_WINDOW_NAME=win",
         ]
 
-    def test_attach_session_command_focuses_kitty_session(self, client):
+    def test_attach_session_command_focuses_tab(self, client, app_socket):
         assert client.attach_session_command("ses") == [
             "kitten",
             "@",
             "--to",
-            f"unix:{client.socket_dir}/ses.sock",
-            "focus-window",
+            app_socket,
+            "focus-tab",
             "--match",
             "env:CAO_SESSION_NAME=ses",
         ]
 
+
+class TestCreateSession:
+    @patch.object(KittyClient, "_wait_for_session_ready", lambda self, s: None)
+    @patch.object(KittyClient, "_wait_for_app_ready", lambda self: None)
     @patch("cli_agent_orchestrator.clients.tmux.subprocess.run")
     @patch("cli_agent_orchestrator.clients.tmux.subprocess.Popen")
-    def test_create_session_writes_kitty_session_file_and_launches_socket(
-        self, mock_popen, mock_run, client, tmp_path
+    def test_first_session_boots_shared_instance_via_session_file(
+        self, mock_popen, mock_run, client, app_socket, tmp_path
     ):
-        mock_run.return_value = completed("[]")
-
+        # No socket file on disk -> shared instance is not running -> boot it.
         result = client.create_session("ses", "my-window", "tid1", str(tmp_path))
 
         assert result == "my-window"
         session_file = client.session_file_path("ses")
         assert session_file.exists()
         session_text = session_file.read_text(encoding="utf-8")
-        assert "os_window_title ses" in session_text
-        assert "os_window_size 220c 50c" in session_text
+        assert "os_window_title CAO" in session_text
+        assert "new_tab ses" in session_text
+        assert "layout tall:bias=65" in session_text
         assert f"cd {tmp_path}" in session_text
         assert "launch --title my-window" in session_text
         assert "--env CAO_SESSION_NAME=ses" in session_text
         assert "--env CAO_WINDOW_NAME=my-window" in session_text
         assert "--env CAO_TERMINAL_ID=tid1" in session_text
 
-        command = mock_popen.call_args.args[0]
-        assert command == [
+        assert mock_popen.call_args.args[0] == [
             "kitty",
             "--detach",
             "--listen-on",
-            f"unix:{client.socket_dir}/ses.sock",
+            app_socket,
             "-o",
             "allow_remote_control=socket-only",
             "--session",
             str(session_file),
         ]
-        assert mock_run.call_args.args[0] == [
+
+    @patch.object(KittyClient, "_base_environment", lambda self, tid, extra: {"CAO_TERMINAL_ID": tid})
+    @patch.object(KittyClient, "_wait_for_session_ready", lambda self, s: None)
+    @patch.object(KittyClient, "_app_running", lambda self: True)
+    @patch("cli_agent_orchestrator.clients.tmux.subprocess.run")
+    @patch("cli_agent_orchestrator.clients.tmux.subprocess.Popen")
+    def test_subsequent_session_adds_tab_to_running_instance(
+        self, mock_popen, mock_run, client, app_socket, tmp_path
+    ):
+        mock_run.side_effect = [completed(), completed()]
+
+        result = client.create_session("ses", "my-window", "tid1", str(tmp_path))
+
+        assert result == "my-window"
+        # A running instance is reused: no new kitty process is spawned.
+        mock_popen.assert_not_called()
+        launch = mock_run.call_args_list[0].args[0]
+        # Base env (here just CAO_TERMINAL_ID) is forwarded, then the session
+        # adds CAO_SESSION_NAME / CAO_WINDOW_NAME.
+        assert launch == [
             "kitten",
             "@",
             "--to",
-            f"unix:{client.socket_dir}/ses.sock",
-            "ls",
+            app_socket,
+            "launch",
+            "--type=tab",
+            "--tab-title",
+            "ses",
+            "--title",
+            "my-window",
+            "--cwd",
+            str(tmp_path),
+            "--var",
+            "cao_session=ses",
+            "--var",
+            "cao_window=my-window",
+            "--env",
+            "CAO_TERMINAL_ID=tid1",
+            "--env",
+            "CAO_SESSION_NAME=ses",
+            "--env",
+            "CAO_WINDOW_NAME=my-window",
+        ]
+        goto_layout = mock_run.call_args_list[1].args[0]
+        assert goto_layout == [
+            "kitten",
+            "@",
+            "--to",
+            app_socket,
+            "goto-layout",
+            "--match",
+            "env:CAO_SESSION_NAME=ses",
+            "tall:bias=65",
         ]
 
 
 class TestCreateWindow:
+    @patch.object(KittyClient, "session_exists", lambda self, s: True)
     @patch("cli_agent_orchestrator.clients.tmux.subprocess.run")
-    def test_create_window_checks_session_and_returns_formatted_window_name(
-        self, mock_run, client, tmp_path
+    def test_create_window_splits_into_session_tab(
+        self, mock_run, client, app_socket, tmp_path
     ):
-        mock_run.side_effect = [completed("[]"), completed("42\n")]
+        mock_run.return_value = completed("42\n")
 
         result = client.create_window("ses", "agent-window", "tid2", str(tmp_path))
 
         assert result == "agent-window"
-        assert mock_run.call_args_list[0].args[0] == [
+        assert mock_run.call_args.args[0] == [
             "kitten",
             "@",
             "--to",
-            f"unix:{client.socket_dir}/ses.sock",
-            "ls",
-        ]
-        command = mock_run.call_args_list[1].args[0]
-        assert command == [
-            "kitten",
-            "@",
-            "--to",
-            f"unix:{client.socket_dir}/ses.sock",
+            app_socket,
             "launch",
             "--type=window",
+            "--match",
+            "env:CAO_SESSION_NAME=ses",
             "--title",
             "agent-window",
             "--cwd",
             str(tmp_path),
-            "--add-to-session",
-            ".",
+            "--var",
+            "cao_window=agent-window",
             "--env",
             "CAO_SESSION_NAME=ses",
             "--env",
@@ -145,12 +220,8 @@ class TestCreateWindow:
             "CAO_TERMINAL_ID=tid2",
         ]
 
-    @patch("cli_agent_orchestrator.clients.tmux.subprocess.run")
-    def test_create_window_session_not_found(self, mock_run, client, tmp_path):
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=["kitten"], returncode=1, stdout="", stderr="missing"
-        )
-
+    @patch.object(KittyClient, "session_exists", lambda self, s: False)
+    def test_create_window_session_not_found(self, client, tmp_path):
         with pytest.raises(ValueError, match="not found"):
             client.create_window("missing", "w", "tid2", str(tmp_path))
 
@@ -159,7 +230,7 @@ class TestSendKeys:
     @patch("cli_agent_orchestrator.clients.tmux.time")
     @patch("cli_agent_orchestrator.clients.tmux.subprocess.run")
     def test_send_keys_sends_stdin_text_then_enter_keys(
-        self, mock_run, mock_time, client
+        self, mock_run, mock_time, client, app_socket
     ):
         mock_run.return_value = completed()
 
@@ -170,10 +241,10 @@ class TestSendKeys:
             "kitten",
             "@",
             "--to",
-            f"unix:{client.socket_dir}/ses.sock",
+            app_socket,
             "send-text",
             "--match",
-            "env:CAO_WINDOW_NAME=win",
+            "env:CAO_SESSION_NAME=ses and env:CAO_WINDOW_NAME=win",
             "--stdin",
             "--bracketed-paste",
             "disable",
@@ -183,10 +254,10 @@ class TestSendKeys:
             "kitten",
             "@",
             "--to",
-            f"unix:{client.socket_dir}/ses.sock",
+            app_socket,
             "send-key",
             "--match",
-            "env:CAO_WINDOW_NAME=win",
+            "env:CAO_SESSION_NAME=ses and env:CAO_WINDOW_NAME=win",
             "enter",
         ]
         assert commands[2] == commands[1]
@@ -194,7 +265,7 @@ class TestSendKeys:
 
 class TestSendSpecialKey:
     @patch("cli_agent_orchestrator.clients.tmux.subprocess.run")
-    def test_send_special_key_uses_kitty_send_key(self, mock_run, client):
+    def test_send_special_key_uses_kitty_send_key(self, mock_run, client, app_socket):
         mock_run.return_value = completed()
 
         client.send_special_key("ses", "win", "C-d")
@@ -203,15 +274,15 @@ class TestSendSpecialKey:
             "kitten",
             "@",
             "--to",
-            f"unix:{client.socket_dir}/ses.sock",
+            app_socket,
             "send-key",
             "--match",
-            "env:CAO_WINDOW_NAME=win",
+            "env:CAO_SESSION_NAME=ses and env:CAO_WINDOW_NAME=win",
             "ctrl+d",
         ]
 
     @patch("cli_agent_orchestrator.clients.tmux.subprocess.run")
-    def test_send_literal_keys_uses_literal_flag(self, mock_run, client):
+    def test_send_literal_keys_uses_literal_flag(self, mock_run, client, app_socket):
         mock_run.return_value = completed()
 
         client.send_literal_keys("ses", "win", "\x1b[B")
@@ -220,10 +291,10 @@ class TestSendSpecialKey:
             "kitten",
             "@",
             "--to",
-            f"unix:{client.socket_dir}/ses.sock",
+            app_socket,
             "send-text",
             "--match",
-            "env:CAO_WINDOW_NAME=win",
+            "env:CAO_SESSION_NAME=ses and env:CAO_WINDOW_NAME=win",
             "--stdin",
             "--bracketed-paste",
             "disable",
@@ -233,7 +304,7 @@ class TestSendSpecialKey:
 
 class TestHistorySessionsAndWindows:
     @patch("cli_agent_orchestrator.clients.tmux.subprocess.run")
-    def test_get_history_captures_ansi_tail(self, mock_run, client):
+    def test_get_history_captures_ansi_tail(self, mock_run, client, app_socket):
         mock_run.return_value = completed("line1\nline2\nline3\n")
 
         result = client.get_history("ses", "win", tail_lines=2)
@@ -243,21 +314,25 @@ class TestHistorySessionsAndWindows:
             "kitten",
             "@",
             "--to",
-            f"unix:{client.socket_dir}/ses.sock",
+            app_socket,
             "get-text",
             "--match",
-            "env:CAO_WINDOW_NAME=win",
+            "env:CAO_SESSION_NAME=ses and env:CAO_WINDOW_NAME=win",
             "--extent",
             "all",
             "--ansi",
         ]
 
+    @patch.object(KittyClient, "_app_running", lambda self: True)
     @patch("cli_agent_orchestrator.clients.tmux.subprocess.run")
-    def test_list_sessions_discovers_kitty_socket_files(self, mock_run, client):
-        client.socket_dir.mkdir(parents=True)
-        (client.socket_dir / "cao-one.sock").touch()
-        (client.socket_dir / "cao-two.sock").touch()
-        mock_run.return_value = completed("[]")
+    def test_list_sessions_groups_tabs_by_session_env(self, mock_run, client):
+        mock_run.return_value = completed(
+            tree_with(
+                {"title": "supervisor", "env": {"CAO_SESSION_NAME": "cao-two"}},
+                {"title": "supervisor", "env": {"CAO_SESSION_NAME": "cao-one"}},
+                {"title": "worker", "env": {"CAO_SESSION_NAME": "cao-one"}},
+            )
+        )
 
         result = client.list_sessions()
 
@@ -267,21 +342,12 @@ class TestHistorySessionsAndWindows:
         ]
 
     @patch("cli_agent_orchestrator.clients.tmux.subprocess.run")
-    def test_get_session_windows_parses_kitty_json(self, mock_run, client):
+    def test_get_session_windows_filters_to_session(self, mock_run, client):
         mock_run.return_value = completed(
-            json.dumps(
-                [
-                    {
-                        "tabs": [
-                            {
-                                "windows": [
-                                    {"title": "worker", "env": {"CAO_WINDOW_NAME": "worker"}},
-                                    {"title": "reviewer", "env": {"CAO_WINDOW_NAME": "reviewer"}},
-                                ]
-                            }
-                        ]
-                    }
-                ]
+            tree_with(
+                {"title": "worker", "env": {"CAO_SESSION_NAME": "ses", "CAO_WINDOW_NAME": "worker"}},
+                {"title": "other", "env": {"CAO_SESSION_NAME": "other-ses", "CAO_WINDOW_NAME": "x"}},
+                {"title": "reviewer", "env": {"CAO_SESSION_NAME": "ses", "CAO_WINDOW_NAME": "reviewer"}},
             )
         )
 
@@ -291,18 +357,38 @@ class TestHistorySessionsAndWindows:
 
 
 class TestCleanupAndPaneMetadata:
+    @patch.object(KittyClient, "_app_running", lambda self: True)
     @patch("cli_agent_orchestrator.clients.tmux.subprocess.run")
-    def test_session_exists_uses_kitty_socket_returncode(self, mock_run, client):
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=["kitten"], returncode=0, stdout="[]", stderr=""
+    def test_session_exists_true_when_tab_present(self, mock_run, client):
+        mock_run.return_value = completed(
+            tree_with({"title": "supervisor", "env": {"CAO_SESSION_NAME": "ses"}})
         )
 
         assert client.session_exists("ses") is True
 
+    @patch.object(KittyClient, "_app_running", lambda self: True)
+    @patch("cli_agent_orchestrator.clients.tmux.subprocess.run")
+    def test_session_exists_false_when_tab_absent(self, mock_run, client):
+        mock_run.return_value = completed(
+            tree_with({"title": "supervisor", "env": {"CAO_SESSION_NAME": "other"}})
+        )
+
+        assert client.session_exists("ses") is False
+
+    @patch.object(KittyClient, "_app_running", lambda self: False)
+    def test_session_exists_false_when_instance_down(self, client):
+        assert client.session_exists("ses") is False
+
     @patch("cli_agent_orchestrator.clients.tmux.subprocess.run")
     def test_get_pane_working_directory_uses_kitty_ls(self, mock_run, client):
         mock_run.return_value = completed(
-            json.dumps([{"tabs": [{"windows": [{"title": "win", "cwd": "/tmp/project"}]}]}])
+            tree_with(
+                {
+                    "title": "win",
+                    "cwd": "/tmp/project",
+                    "env": {"CAO_SESSION_NAME": "ses", "CAO_WINDOW_NAME": "win"},
+                }
+            )
         )
 
         assert client.get_pane_working_directory("ses", "win") == "/tmp/project"
@@ -310,26 +396,37 @@ class TestCleanupAndPaneMetadata:
     @patch("cli_agent_orchestrator.clients.tmux.subprocess.run")
     def test_get_pane_working_directory_prefers_foreground_process_cwd(self, mock_run, client):
         mock_run.return_value = completed(
-            json.dumps(
-                [
-                    {
-                        "tabs": [
-                            {
-                                "windows": [
-                                    {
-                                        "title": "win",
-                                        "cwd": "/tmp/project",
-                                        "foreground_processes": [{"cwd": "/tmp/project/subdir"}],
-                                    }
-                                ]
-                            }
-                        ]
-                    }
-                ]
+            tree_with(
+                {
+                    "title": "win",
+                    "cwd": "/tmp/project",
+                    "env": {"CAO_SESSION_NAME": "ses", "CAO_WINDOW_NAME": "win"},
+                    "foreground_processes": [{"cwd": "/tmp/project/subdir"}],
+                }
             )
         )
 
         assert client.get_pane_working_directory("ses", "win") == "/tmp/project/subdir"
+
+    @patch.object(KittyClient, "_app_running", lambda self: True)
+    @patch("cli_agent_orchestrator.clients.tmux.subprocess.run")
+    def test_kill_session_closes_tab_by_session_match(self, mock_run, client, app_socket):
+        mock_run.return_value = completed()
+
+        # _app_running is patched True throughout, so the post-close socket
+        # cleanup branch is skipped; assert the close-window call shape.
+        client.kill_session("ses")
+
+        assert mock_run.call_args_list[0].args[0] == [
+            "kitten",
+            "@",
+            "--to",
+            app_socket,
+            "close-window",
+            "--match",
+            "env:CAO_SESSION_NAME=ses",
+            "--ignore-no-match",
+        ]
 
     @patch("cli_agent_orchestrator.clients.tmux.threading.Thread")
     def test_pipe_pane_starts_kitty_log_mirror(self, mock_thread_cls, client, tmp_path):

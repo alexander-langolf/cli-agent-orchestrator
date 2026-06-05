@@ -28,9 +28,10 @@ cao flow list
 cao flow run morning-trivia
 
 # 5. View flow execution (after it runs)
-ls ~/.aws/cli-agent-orchestrator/kitty/*.sock
-kitten @ --to unix:~/.aws/cli-agent-orchestrator/kitty/<session-name>.sock \
-  focus-window --match env:CAO_SESSION_NAME=<session-name>
+# All sessions are tabs in one shared kitty instance reached via cao.sock.
+kitten @ --to unix:~/.aws/cli-agent-orchestrator/kitty/cao.sock ls
+kitten @ --to unix:~/.aws/cli-agent-orchestrator/kitty/cao.sock \
+  focus-tab --match env:CAO_SESSION_NAME=<session-name>
 
 # 6. Cleanup session when done
 cao shutdown --session <session-name>

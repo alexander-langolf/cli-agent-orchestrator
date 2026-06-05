@@ -274,7 +274,7 @@ def test_launch_non_headless_attaches_even_if_wait_times_out():
         attach_cmd = mock_subprocess.call_args.args[0]
         assert attach_cmd[:3] == ["kitten", "@", "--to"]
         assert attach_cmd[3].startswith("unix:")
-        assert attach_cmd[3].endswith("/test-session.sock")
+        assert attach_cmd[3].endswith("/cao.sock")
         assert attach_cmd[-2:] == ["--match", "env:CAO_SESSION_NAME=test-session"]
 
 

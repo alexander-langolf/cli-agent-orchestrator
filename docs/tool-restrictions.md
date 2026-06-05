@@ -42,7 +42,7 @@ role: supervisor
 
 | Role | Default `allowedTools` | What the agent can do |
 |------|----------------------|----------------------|
-| `supervisor` | `@cao-mcp-server`, `fs_read`, `fs_list` | Orchestrate workers + read files for context |
+| `supervisor` | `@cao-mcp-server`, `fs_read`, `fs_list`, `execute_bash` | Orchestrate workers + read files + run shell tools (e.g. `gh`) |
 | `developer` | `@builtin`, `fs_*`, `execute_bash`, `@cao-mcp-server` | Full access: read, write, execute, orchestrate |
 | `reviewer` | `@builtin`, `fs_read`, `fs_list`, `@cao-mcp-server` | Read-only: review code, no writes or execution |
 
