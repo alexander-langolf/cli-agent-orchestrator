@@ -29,7 +29,11 @@ from cli_agent_orchestrator.utils.terminal import wait_for_shell, wait_until_sta
 
 logger = logging.getLogger(__name__)
 
-ANSI_CODE_PATTERN = r"\x1b\[[0-9;]*m"
+# Cursor's TUI emits colon-form RGB SGR codes (e.g. "\x1b[48:2:27:32:36m")
+# plus cursor-movement / line-clear CSI sequences. A narrow "[0-9;]*m" SGR
+# matcher leaves the colon-form codes behind, which corrupts text extraction.
+# Strip the full CSI grammar: params [0-9;:?], intermediates [ -/], final [@-~].
+ANSI_CODE_PATTERN = r"\x1b\[[0-9;:?]*[ -/]*[@-~]"
 
 # How many lines from the bottom to inspect. Cursor runs its TUI inline; the
 # input bar + status bar live in the last several lines.

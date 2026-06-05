@@ -51,6 +51,20 @@ TRUST = """\
   ╰──────────────────────────────────────────╯
 """
 
+# Real cursor TUI emits colon-form RGB SGR codes (e.g. "\x1b[48:2:27:32:36m").
+# Here one lands *between* the arrow and the prompt text — the old narrow
+# "[0-9;]*m" SGR matcher leaves it in place, breaking the IDLE regex. The full
+# CSI matcher strips it. This fixture carries raw escapes on purpose.
+IDLE_COLON_ANSI = (
+    "  Cursor Agent\n"
+    "  v2026.05.09-0afadcc\n"
+    " \x1b[m▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
+    "  \x1b[m \x1b[22;2m→\x1b[48:2:27:32:36m Plan, search, build anything\x1b[m\n"
+    " \x1b[m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
+    "  \x1b[38:2:170:170:170mGPT-5.4 272K Medium\x1b[m\n"
+    "  /private/tmp/curtest\n"
+)
+
 
 def _provider():
     return CursorProvider("tid-1234", "sess", "win-0", agent_profile=None, allowed_tools=["*"])
@@ -81,6 +95,14 @@ class TestCursorStatus:
     def test_empty_is_error(self, mock_tmux):
         mock_tmux.get_history.return_value = ""
         assert _provider().get_status() == TerminalStatus.ERROR
+
+    @patch("cli_agent_orchestrator.providers.cursor_agent.tmux_client")
+    def test_idle_with_colon_form_ansi_between_arrow_and_text(self, mock_tmux):
+        # Regression: colon-form RGB SGR between "→" and the prompt text must be
+        # stripped so the idle bar is still recognized. The old narrow SGR
+        # pattern left it in and reported a false non-IDLE state.
+        mock_tmux.get_history.return_value = IDLE_COLON_ANSI
+        assert _provider().get_status() == TerminalStatus.IDLE
 
     @patch("cli_agent_orchestrator.providers.cursor_agent.tmux_client")
     def test_stale_spinner_in_scrollback_does_not_latch(self, mock_tmux):
