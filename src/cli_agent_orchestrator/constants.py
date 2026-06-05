@@ -136,6 +136,11 @@ MCP_TERMINAL_CREATE_TIMEOUT = int(os.environ.get("CAO_MCP_TERMINAL_CREATE_TIMEOU
 # server fails cleanly before the assign client gives up.
 CODEX_INIT_TIMEOUT = float(os.environ.get("CAO_CODEX_INIT_TIMEOUT", "120"))
 
+# Timeout (seconds) the Cursor provider waits for the cursor-agent TUI to reach
+# an idle/ready state during initialize(). Cursor warms up its TUI and approves
+# the project MCP server on first launch; keep below MCP_TERMINAL_CREATE_TIMEOUT.
+CURSOR_INIT_TIMEOUT = float(os.environ.get("CAO_CURSOR_INIT_TIMEOUT", "120"))
+
 
 # Operators can extend network allowlists via the env vars handled below.
 # Same comma-separated pattern as ``CAO_PROFILE_ALLOWED_HOSTS`` in install_service.

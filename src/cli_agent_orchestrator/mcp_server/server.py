@@ -15,6 +15,7 @@ from cli_agent_orchestrator.constants import (
     DEFAULT_PROVIDER,
     MCP_REQUEST_TIMEOUT,
     MCP_TERMINAL_CREATE_TIMEOUT,
+    PROVIDERS,
 )
 from cli_agent_orchestrator.mcp_server.models import HandoffResult
 from cli_agent_orchestrator.models.inbox import OrchestrationType
@@ -143,20 +144,31 @@ def _resolve_child_allowed_tools(
 
 
 def _create_terminal(
-    agent_profile: str, working_directory: Optional[str] = None
+    agent_profile: str,
+    working_directory: Optional[str] = None,
+    provider_override: Optional[str] = None,
 ) -> Tuple[str, str]:
     """Create a new terminal with the specified agent profile.
 
     Args:
         agent_profile: Agent profile for the terminal
         working_directory: Optional working directory for the terminal
+        provider_override: Optional provider to use instead of the one resolved
+            from the profile (used by assign to spawn a worker on a specific
+            provider on request). Must be a registered provider.
 
     Returns:
         Tuple of (terminal_id, provider)
 
     Raises:
+        ValueError: If provider_override is not a registered provider
         Exception: If terminal creation fails
     """
+    if provider_override is not None and provider_override not in PROVIDERS:
+        raise ValueError(
+            f"Invalid provider '{provider_override}'. Valid providers: {', '.join(PROVIDERS)}"
+        )
+
     provider = DEFAULT_PROVIDER
     parent_allowed_tools = None
 
@@ -170,8 +182,11 @@ def _create_terminal(
         response.raise_for_status()
         terminal_metadata = response.json()
 
-        # Treat the supervisor provider as a fallback, not an explicit override.
-        provider = resolve_provider(agent_profile, fallback_provider=terminal_metadata["provider"])
+        # An explicit provider_override wins; otherwise treat the supervisor
+        # provider as a fallback behind the profile's own provider.
+        provider = provider_override or resolve_provider(
+            agent_profile, fallback_provider=terminal_metadata["provider"]
+        )
         session_name = terminal_metadata["session_name"]
         parent_allowed_tools = terminal_metadata.get("allowed_tools")
 
@@ -215,7 +230,7 @@ def _create_terminal(
     else:
         # Create new session with terminal
         session_name = generate_session_name()
-        provider = resolve_provider(agent_profile, fallback_provider=provider)
+        provider = provider_override or resolve_provider(agent_profile, fallback_provider=provider)
         params = {
             "provider": provider,
             "agent_profile": agent_profile,
@@ -553,12 +568,15 @@ else:
 
 # Implementation function for assign
 def _assign_impl(
-    agent_profile: str, message: str, working_directory: Optional[str] = None
+    agent_profile: str,
+    message: str,
+    working_directory: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Implementation of assign logic."""
     try:
         # Create terminal
-        terminal_id, _ = _create_terminal(agent_profile, working_directory)
+        terminal_id, _ = _create_terminal(agent_profile, working_directory, provider_override=provider)
 
         # Guard: wait for the terminal to be genuinely ready before sending
         # the task message. create_terminal() calls provider.initialize() which
@@ -635,6 +653,11 @@ Args:
     working_directory: Optional working directory where the agent should execute"""
 
     desc += """
+    provider: Optional provider override (e.g. "codex", "claude_code", "cursor_agent").
+        Spawn the worker on a specific provider on request, instead of the
+        profile's default. Must be a registered provider."""
+
+    desc += """
 
 Returns:
     Dict with success status, worker terminal_id, and message"""
@@ -662,8 +685,16 @@ if ENABLE_WORKING_DIRECTORY:
         working_directory: Optional[str] = Field(
             default=None, description="Optional working directory where the agent should execute"
         ),
+        provider: Optional[str] = Field(
+            default=None,
+            description=(
+                "Optional provider override (e.g. 'codex', 'claude_code', 'cursor_agent'). "
+                "Spawns the worker on this provider instead of the profile's default. "
+                "Must be a registered provider; invalid values error."
+            ),
+        ),
     ) -> Dict[str, Any]:
-        return _assign_impl(agent_profile, message, working_directory)
+        return _assign_impl(agent_profile, message, working_directory, provider)
 
 else:
 
@@ -673,8 +704,16 @@ else:
             description='The agent profile for the worker agent (e.g., "developer", "analyst")'
         ),
         message: str = Field(description=_assign_message_field_desc),
+        provider: Optional[str] = Field(
+            default=None,
+            description=(
+                "Optional provider override (e.g. 'codex', 'claude_code', 'cursor_agent'). "
+                "Spawns the worker on this provider instead of the profile's default. "
+                "Must be a registered provider; invalid values error."
+            ),
+        ),
     ) -> Dict[str, Any]:
-        return _assign_impl(agent_profile, message, None)
+        return _assign_impl(agent_profile, message, None, provider)
 
 
 # Implementation function for send_message
